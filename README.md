@@ -299,19 +299,7 @@ Sve mape su interaktivne sa mogućnošću:
 - Kliktanja na markere za detaljne informacije
 - Pregleda legendi
 
----
 
-## Deployment i Pristup
-
-### Supabase Baza Podataka
-
-Baza je dostupna na Supabase cloud platformi. Kolege mogu pristupiti:
-
-1. Idi na https://supabase.com
-2. Prijavi se sa njihovim nalogom
-3. Pronađi organizaciju `anjastojkovic2004's Org`
-4. Otvori projekat `SistemZaUpravljanjeOtpadomIDivljimDeponijama`
-5. Prosledi podatke za konekciju (ako su dodeljeni kao članovi)
 
 ### 4. Pokreni Deo 1 — Baza
 ```bash
