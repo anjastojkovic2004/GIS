@@ -67,5 +67,58 @@ df6 = pd.read_sql("""
 """, conn)
 print(df6)
 
+# 7. Broj kontejnera i ukupni kapacitet po lokaciji
+print("\n=== 7. Broj kontejnera i ukupni kapacitet po lokaciji ===")
+df7 = pd.read_sql("""
+    SELECT l.naziv as lokacija, l.opstina,
+           COUNT(k.id) as broj_kontejnera,
+           COALESCE(SUM(k.kapacitet_litara), 0) as ukupni_kapacitet_l
+    FROM lokacije l
+    LEFT JOIN kontejneri k ON k.lokacija_id = l.id
+    GROUP BY l.id, l.naziv, l.opstina
+    ORDER BY broj_kontejnera DESC
+""", conn)
+print(df7)
+
+# 8. Najnovija inspekcija po deponiji sa statusom
+print("\n=== 8. Poslednja inspekcija po deponiji ===")
+df8 = pd.read_sql("""
+    SELECT d.naziv as deponija, d.status,
+           MAX(i.datum) as datum_poslednje_inspekcije,
+           COUNT(i.id) as ukupno_inspekcija
+    FROM deponije d
+    JOIN inspekcije i ON i.deponija_id = d.id
+    GROUP BY d.id, d.naziv, d.status
+    ORDER BY datum_poslednje_inspekcije DESC
+""", conn)
+print(df8)
+
+# 9. Lokacije bez kontejnera (LEFT JOIN + IS NULL)
+print("\n=== 9. Lokacije bez kontejnera ===")
+df9 = pd.read_sql("""
+    SELECT l.naziv, l.opstina, l.tip_podrucja
+    FROM lokacije l
+    LEFT JOIN kontejneri k ON k.lokacija_id = l.id
+    WHERE k.id IS NULL
+""", conn)
+print(df9)
+
+# 10. Sveobuhvatni izveštaj — kontejneri, deponije i inspekcije po lokaciji
+print("\n=== 10. Sveobuhvatni izveštaj po lokaciji ===")
+df10 = pd.read_sql("""
+    SELECT l.naziv as lokacija, l.opstina,
+           COUNT(DISTINCT k.id) as kontejneri,
+           COUNT(DISTINCT d.id) as deponije,
+           COUNT(DISTINCT i.id) as inspekcije,
+           COALESCE(SUM(DISTINCT d.povrsina_m2), 0) as ukupna_povrsina_m2
+    FROM lokacije l
+    LEFT JOIN kontejneri k ON k.lokacija_id = l.id
+    LEFT JOIN deponije d ON d.lokacija_id = l.id
+    LEFT JOIN inspekcije i ON i.deponija_id = d.id
+    GROUP BY l.id, l.naziv, l.opstina
+    ORDER BY deponije DESC, kontejneri DESC
+""", conn)
+print(df10)
+
 conn.close()
 print("\n=== DEO 1 KOMPLETIRAN! ===")
