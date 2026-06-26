@@ -3,12 +3,16 @@ import psycopg2
 import numpy as np
 import folium
 import geopandas as gpd
+import joblib
+import os
 from datetime import datetime
 from shapely.geometry import Point
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.preprocessing import LabelEncoder
+
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'model_deponije.pkl')
 
 DB_URL = "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
 
@@ -303,13 +307,20 @@ if __name__ == "__main__":
     print("LOKACIJE U SISTEMU:")
     print(lokacije_df.to_string(index=False))
 
-    # 1. Generiši trening podatke
-    print("\nGenerisanje sintetickih satelitskih podataka...")
-    X, y = generiraj_trening_podatke(n_pixela=2000)
-    print(f"Trening skup: {len(X)} piksela, klase: {np.unique(y).tolist()}")
+    # 1. Učitaj model ako postoji, inače treniraj i sačuvaj
+    if os.path.exists(MODEL_PATH):
+        print(f"\nUčitavam sačuvani model iz '{MODEL_PATH}'...")
+        clf = joblib.load(MODEL_PATH)
+        print("Model učitan!")
+    else:
+        print("\nGenerisanje sintetickih satelitskih podataka...")
+        X, y = generiraj_trening_podatke(n_pixela=2000)
+        print(f"Trening skup: {len(X)} piksela, klase: {np.unique(y).tolist()}")
 
-    # 2. Treniraj model
-    clf = treniraj_model(X, y)
+        clf = treniraj_model(X, y)
+
+        joblib.dump(clf, MODEL_PATH)
+        print(f"Model sačuvan kao '{MODEL_PATH}'")
 
     # 3. Primeni model — detekcija
     ml_deponije_df = detektuj_deponije(clf, lokacije_df, n_uzoraka_po_lokaciji=80)
