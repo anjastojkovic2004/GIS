@@ -1,10 +1,13 @@
 import geopandas as gpd
 import pandas as pd
 import psycopg2
+import os
 from shapely.geometry import Point, box, Polygon
 import folium
+from dotenv import load_dotenv
 
-DB_URL = "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+load_dotenv()
+DB_URL = os.environ.get("DB_URL")
 
 def get_connection():
     return psycopg2.connect(DB_URL)
@@ -64,19 +67,19 @@ def union_operacija(buffer_zone):
     print("\n3️⃣ UNION — Spoji sve zaštitne zone u jedan poligon")
     
     # Unija svih buffer zona
-    union_geom = buffer_zone.geometry.unary_union
+    union_geom = buffer_zone.geometry.union_all()
     
-    print(f"Единствена unija kreirана")
+    print(f"Jedinstvena unija kreirana")
     print(f"Površina: {union_geom.area:.4f} kvadratnih stepeni")
     
     return union_geom
 
 # 4. CLIP — Iseci samo deponije koje se nalaze u određenom području
 def clip_operacija(lokacije_df):
-    print("\n4️⃣ CLIP — Iseci samo lokacije u području oko Novog Sada")
+    print("\n4️⃣ CLIP — Iseci samo lokacije u području Vojvodine")
     
-    # Definiši klipujuću zonu (kvadrat oko Novog Sada)
-    clip_box = box(19.7, 45.1, 20.0, 45.4)
+    # Definiši klipujuću zonu (bbox Vojvodine)
+    clip_box = box(18.8, 44.6, 21.7, 46.2)
     gdf_clip = gpd.GeoDataFrame([1], geometry=[clip_box], crs='EPSG:4326')
     
     # Kreiraj GeoDataFrame lokacija
@@ -118,7 +121,7 @@ def query_within(lokacije_df, buffer_zone):
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
     
     # Within query
-    result = gdf_lokacije[gdf_lokacije.geometry.within(buffer_zone.geometry.unary_union)]
+    result = gdf_lokacije[gdf_lokacije.geometry.within(buffer_zone.geometry.union_all())]
     
     print(f"Pronađeno {len(result)} lokacija")
     print(result[['naziv']])
@@ -144,7 +147,7 @@ def query_contains(lokacije_df, buffer_zone):
     geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
     
-    result = gpd.sjoin(gdf_lokacije, buffer_zone, how='inner', predicate='contains')
+    result = gpd.sjoin(gdf_lokacije, buffer_zone, how='inner', predicate='within')
     
     print(f"Pronađeno {len(result)} sadržavanja")
     return result
@@ -169,7 +172,7 @@ def query_disjoint(lokacije_df, buffer_zone):
     geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
     
-    result = gdf_lokacije[~gdf_lokacije.geometry.intersects(buffer_zone.geometry.unary_union)]
+    result = gdf_lokacije[~gdf_lokacije.geometry.intersects(buffer_zone.geometry.union_all())]
     
     print(f"Pronađeno {len(result)} disjunktnih lokacija")
     print(result[['naziv']])

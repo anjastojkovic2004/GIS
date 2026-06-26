@@ -3,14 +3,14 @@ import folium
 import pandas as pd
 import psycopg2
 from shapely.geometry import Point
+from shapely import wkt as swkt
 import urllib.request
 import zipfile
 import os
+from dotenv import load_dotenv
 
-DB_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
-)
+load_dotenv()
+DB_URL = os.environ.get("DB_URL")
 SHP_DIR = os.path.join(os.path.dirname(__file__), '..', 'serbia_shp')
 
 def get_connection():
@@ -37,20 +37,20 @@ def preuzmi_shp_podatke():
 # 2. Učitavanje SHP fajlova u GeoDataFrame
 # ─────────────────────────────────────────────
 def ucitaj_shp_podatke():
-    """Ucitava places i landuse SHP, filtrira na Novi Sad bbox."""
+    """Ucitava places i landuse SHP, filtrira na Vojvodina bbox."""
     print("\nUcitavanje SHP podataka...")
 
     # 2a. Mesta (tacke)
     places_path = os.path.join(SHP_DIR, 'gis_osm_places_free_1.shp')
     gdf_places = gpd.read_file(places_path)
-    gdf_places = gdf_places.cx[19.6:20.1, 45.1:45.5].copy()
-    print(f"  Places — {len(gdf_places)} objekata u oblasti Novog Sada")
+    gdf_places = gdf_places.cx[18.8:21.7, 44.6:46.2].copy()
+    print(f"  Places — {len(gdf_places)} objekata u Vojvodini")
 
     # 2b. Korišćenje zemljišta (poligoni)
     landuse_path = os.path.join(SHP_DIR, 'gis_osm_landuse_a_free_1.shp')
     gdf_landuse = gpd.read_file(landuse_path)
-    gdf_landuse = gdf_landuse.cx[19.7:20.0, 45.15:45.40].copy()
-    print(f"  Landuse — {len(gdf_landuse)} poligona u oblasti Novog Sada")
+    gdf_landuse = gdf_landuse.cx[18.8:21.7, 44.6:46.2].copy()
+    print(f"  Landuse — {len(gdf_landuse)} poligona u Vojvodini")
 
     return gdf_places, gdf_landuse
 
@@ -127,7 +127,7 @@ def spoji_shp_sa_bazom(df_lokacije, gdf_places):
 def kreiraj_mapu(df_lokacije, df_kontejneri, deponije_data, gdf_places, gdf_landuse):
     print("\nKreiranje mape...")
 
-    mapa = folium.Map(location=[45.2552, 19.8362], zoom_start=12)
+    mapa = folium.Map(location=[45.25, 20.0], zoom_start=8)
 
     # ── Raster podloga: satelitski snimak (Esri World Imagery WMS tile) ──
     folium.TileLayer(
@@ -212,24 +212,34 @@ def kreiraj_mapu(df_lokacije, df_kontejneri, deponije_data, gdf_places, gdf_land
         ).add_to(fg_kontejneri)
     fg_kontejneri.add_to(mapa)
 
-    # ── Sloj 5: Deponije (poligoni) ──
+    # ── Sloj 5: Deponije (poligoni + marker na centroidu) ──
     fg_deponije = folium.FeatureGroup(name='Deponije (baza)', show=True)
     for deponija in deponije_data:
         _, naziv, povrsina, tip_otpada, status, geom_text = deponija
         if not geom_text or 'POLYGON' not in geom_text:
             continue
         color = 'red' if status == 'aktivna' else ('orange' if status == 'u sanaciji' else 'green')
-        coords_str = geom_text.replace('POLYGON((', '').replace('))', '').strip()
+        popup_html = (f"<b>{naziv}</b><br>"
+                      f"Površina: {povrsina} m²<br>"
+                      f"Tip: {tip_otpada}<br>"
+                      f"Status: {status}")
         try:
-            coords = [[float(y), float(x)] for x, y in [c.split() for c in coords_str.split(',')]]
+            geom = swkt.loads(geom_text)
+            if geom.geom_type == 'MultiPolygon':
+                geom = list(geom.geoms)[0]
+            coords = [[y, x] for x, y in geom.exterior.coords]
             folium.Polygon(
                 locations=coords,
-                popup=(f"<b>{naziv}</b><br>"
-                       f"Površina: {povrsina} m²<br>"
-                       f"Tip: {tip_otpada}<br>"
-                       f"Status: {status}"),
+                popup=popup_html,
                 color=color, fill=True, fillColor=color,
                 fillOpacity=0.5, weight=2
+            ).add_to(fg_deponije)
+            centroid = geom.centroid
+            folium.Marker(
+                location=[centroid.y, centroid.x],
+                popup=popup_html,
+                tooltip=naziv,
+                icon=folium.Icon(color=color, icon='warning-sign', prefix='glyphicon')
             ).add_to(fg_deponije)
         except Exception:
             continue
@@ -238,8 +248,9 @@ def kreiraj_mapu(df_lokacije, df_kontejneri, deponije_data, gdf_places, gdf_land
     # Kontrola slojeva
     folium.LayerControl(collapsed=False).add_to(mapa)
 
-    mapa.save('mapa_novi_sad.html')
-    print("Mapa sacuvana kao 'mapa_novi_sad.html'")
+    out_path = os.path.join(os.path.dirname(__file__), 'mapa_vojvodina.html')
+    mapa.save(out_path)
+    print(f"Mapa sacuvana kao '{out_path}'")
 
 
 if __name__ == "__main__":

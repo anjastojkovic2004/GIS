@@ -1,11 +1,13 @@
 import geopandas as gpd
 import pandas as pd
 import psycopg2
+import os
 from shapely.geometry import Point, box
 import folium
-from folium import plugins
+from dotenv import load_dotenv
 
-DB_URL = "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+load_dotenv()
+DB_URL = os.environ.get("DB_URL")
 
 def get_connection():
     return psycopg2.connect(DB_URL)
@@ -23,8 +25,8 @@ def kreiraj_mapu_spatial(lokacije_df):
     
     # Osnovna mapa
     mapa = folium.Map(
-        location=[45.2552, 19.8362],
-        zoom_start=12,
+        location=[45.25, 20.0],
+        zoom_start=8,
         tiles='OpenStreetMap'
     )
     
@@ -33,7 +35,7 @@ def kreiraj_mapu_spatial(lokacije_df):
     gdf = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
     gdf_utm = gdf.to_crs('EPSG:32634')
     gdf_buffer = gdf_utm.copy()
-    gdf_buffer['geometry'] = gdf_utm.geometry.buffer(500)
+    gdf_buffer['geometry'] = gdf_utm.geometry.buffer(10000)  # 10km
     gdf_buffer = gdf_buffer.to_crs('EPSG:4326')
     
     # Sloj 1: Lokacije
@@ -50,12 +52,12 @@ def kreiraj_mapu_spatial(lokacije_df):
         ).add_to(fg_lokacije)
     fg_lokacije.add_to(mapa)
     
-    # Sloj 2: Buffer zone (500m)
-    fg_buffer = folium.FeatureGroup(name='Buffer zone (500m)', show=True)
+    # Sloj 2: Buffer zone (10km)
+    fg_buffer = folium.FeatureGroup(name='Buffer zone (10km)', show=True)
     for idx, row in gdf_buffer.iterrows():
         folium.Polygon(
             locations=[(lat, lon) for lon, lat in row.geometry.exterior.coords],
-            popup=f"<b>Buffer: {row['naziv']}</b><br>Radijus: 500m",
+            popup=f"<b>Buffer: {row['naziv']}</b><br>Radijus: 10km",
             color='green',
             fill=True,
             fillColor='lightgreen',
@@ -67,15 +69,15 @@ def kreiraj_mapu_spatial(lokacije_df):
     # Sloj 3: Clip zona (kvadrat oko Novog Sada)
     fg_clip = folium.FeatureGroup(name='Clip zona', show=True)
     clip_coords = [
-        [45.1, 19.7],
-        [45.1, 20.0],
-        [45.4, 20.0],
-        [45.4, 19.7],
-        [45.1, 19.7]
+        [44.6, 18.8],
+        [44.6, 21.7],
+        [46.2, 21.7],
+        [46.2, 18.8],
+        [44.6, 18.8]
     ]
     folium.Polygon(
         locations=clip_coords,
-        popup="<b>Clip zona</b><br>Područje od interesa",
+        popup="<b>Clip zona</b><br>Područje Vojvodine",
         color='orange',
         fill=True,
         fillColor='yellow',
@@ -111,8 +113,8 @@ def kreiraj_mapu_spatial(lokacije_df):
      <b style="color: blue;">● Lokacije</b><br>
      Tačke sa lokalacijama<br><br>
      
-     <b style="color: green;">◾ Buffer zone (500m)</b><br>
-     Zaštitne zone od 500m<br><br>
+     <b style="color: green;">◾ Buffer zone (10km)</b><br>
+     Zaštitne zone od 10km<br><br>
      
      <b style="color: orange;">◾ Clip zona</b><br>
      Kvadrat oblasti od interesa<br><br>
@@ -124,8 +126,9 @@ def kreiraj_mapu_spatial(lokacije_df):
     mapa.get_root().html.add_child(folium.Element(legend_html))
     
     # Sačuvaj
-    mapa.save('mapa_spatial_operacije.html')
-    print("✅ Mapa sačuvana kao 'mapa_spatial_operacije.html'")
+    out_path = os.path.join(os.path.dirname(__file__), 'mapa_spatial_operacije.html')
+    mapa.save(out_path)
+    print(f"✅ Mapa sačuvana kao '{out_path}'")
 
 if __name__ == "__main__":
     lokacije_df = ucitaj_podatke()
