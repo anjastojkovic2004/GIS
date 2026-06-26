@@ -7,7 +7,10 @@ from streamlit_folium import st_folium
 from shapely.geometry import Point, box
 import os
 
-DB_URL = "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+DB_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+)
 
 def get_connection():
     return psycopg2.connect(DB_URL)
@@ -761,7 +764,10 @@ elif menu == "Spatial Analiza":
             if outside.empty:
                 st.info("Sve lokacije se nalaze unutar buffer zona.")
             else:
-                st.dataframe(outside[['naziv', 'lon', 'lat']], use_container_width=True)
+                st.dataframe(
+                    outside[['naziv_left', 'lon', 'lat']].rename(columns={'naziv_left': 'naziv'}),
+                    use_container_width=True
+                )
                 st.caption(f"{len(outside)} lokacija je izvan buffer zona ostalih lokacija.")
     else:
         st.warning("Nema lokacija za overlay operacije.")

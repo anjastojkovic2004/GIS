@@ -1,10 +1,127 @@
 import psycopg2
 import pandas as pd
+import os
 
-DB_URL = "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+DB_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+)
 
 def get_connection():
     return psycopg2.connect(DB_URL)
+
+
+# ─────────────────────────────────────────────
+# LOKACIJE CRUD
+# ─────────────────────────────────────────────
+
+def dodaj_lokaciju(naziv, opstina, adresa, tip_podrucja, lon, lat):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO lokacije (naziv, opstina, adresa, tip_podrucja, geom)
+        VALUES (%s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+        RETURNING id
+    """, (naziv, opstina, adresa, tip_podrucja, lon, lat))
+    new_id = cursor.fetchone()[0]
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"Lokacija '{naziv}' uspešno dodata (id={new_id})!")
+    return new_id
+
+def prikazi_lokacije():
+    conn = get_connection()
+    df = pd.read_sql("""
+        SELECT id, naziv, opstina, adresa, tip_podrucja,
+               ST_X(geom) as lon, ST_Y(geom) as lat
+        FROM lokacije
+        ORDER BY id
+    """, conn)
+    conn.close()
+    print(df)
+    return df
+
+def azuriraj_lokaciju(lokacija_id, novi_naziv, nova_opstina, nova_adresa, novi_tip):
+    lokacija_id = int(lokacija_id)
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE lokacije
+        SET naziv = %s, opstina = %s, adresa = %s, tip_podrucja = %s
+        WHERE id = %s
+    """, (novi_naziv, nova_opstina, nova_adresa, novi_tip, lokacija_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"Lokacija {lokacija_id} ažurirana!")
+
+def obrisi_lokaciju(lokacija_id):
+    lokacija_id = int(lokacija_id)
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM lokacije WHERE id = %s", (lokacija_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"Lokacija {lokacija_id} obrisana!")
+
+
+# ─────────────────────────────────────────────
+# KOMUNALNA PREDUZEĆA CRUD
+# ─────────────────────────────────────────────
+
+def dodaj_preduzece(naziv, kontakt_telefon, email, zona_pokrivenosti, lokacija_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO komunalna_preduzeca (naziv, kontakt_telefon, email, zona_pokrivenosti, lokacija_id)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id
+    """, (naziv, kontakt_telefon, email, zona_pokrivenosti, lokacija_id))
+    new_id = cursor.fetchone()[0]
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"Preduzeće '{naziv}' uspešno dodato (id={new_id})!")
+    return new_id
+
+def prikazi_preduzeca():
+    conn = get_connection()
+    df = pd.read_sql("""
+        SELECT kp.id, kp.naziv, kp.kontakt_telefon, kp.email,
+               kp.zona_pokrivenosti, l.naziv as lokacija
+        FROM komunalna_preduzeca kp
+        JOIN lokacije l ON kp.lokacija_id = l.id
+        ORDER BY kp.id
+    """, conn)
+    conn.close()
+    print(df)
+    return df
+
+def azuriraj_preduzece(preduzece_id, novi_telefon, novi_email, nova_zona):
+    preduzece_id = int(preduzece_id)
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE komunalna_preduzeca
+        SET kontakt_telefon = %s, email = %s, zona_pokrivenosti = %s
+        WHERE id = %s
+    """, (novi_telefon, novi_email, nova_zona, preduzece_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"Preduzeće {preduzece_id} ažurirano!")
+
+def obrisi_preduzece(preduzece_id):
+    preduzece_id = int(preduzece_id)
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM komunalna_preduzeca WHERE id = %s", (preduzece_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"Preduzeće {preduzece_id} obrisano!")
 
 
 # ─────────────────────────────────────────────
@@ -181,6 +298,51 @@ def obrisi_inspekciju(inspekcija_id):
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # ── LOKACIJE ──────────────────────────────
+    print("=" * 60)
+    print("CRUD – LOKACIJE")
+    print("=" * 60)
+
+    print("\n=== POČETNO STANJE ===")
+    prikazi_lokacije()
+
+    nov_id = dodaj_lokaciju('Test lokacija', 'Novi Sad', 'Test adresa 1', 'stambeno', 19.85, 45.25)
+
+    print("\n=== NAKON DODAVANJA ===")
+    prikazi_lokacije()
+
+    azuriraj_lokaciju(nov_id, 'Test lokacija izmenjena', 'Novi Sad', 'Nova adresa 2', 'industrijsko')
+    print("\n=== NAKON AŽURIRANJA ===")
+    prikazi_lokacije()
+
+    obrisi_lokaciju(nov_id)
+    print("\n=== NAKON BRISANJA ===")
+    prikazi_lokacije()
+
+    # ── KOMUNALNA PREDUZEĆA ───────────────────
+    print("\n" + "=" * 60)
+    print("CRUD – KOMUNALNA PREDUZEĆA")
+    print("=" * 60)
+
+    print("\n=== POČETNO STANJE ===")
+    prikazi_preduzeca()
+
+    df_lok = prikazi_lokacije()
+    lok_id = int(df_lok.iloc[0]['id'])
+
+    nov_id = dodaj_preduzece('Test Komunalno', '021-000-000', 'test@komunalno.rs', 'Zona Test', lok_id)
+
+    print("\n=== NAKON DODAVANJA ===")
+    prikazi_preduzeca()
+
+    azuriraj_preduzece(nov_id, '021-111-111', 'novo@komunalno.rs', 'Zona Izmenjena')
+    print("\n=== NAKON AŽURIRANJA ===")
+    prikazi_preduzeca()
+
+    obrisi_preduzece(nov_id)
+    print("\n=== NAKON BRISANJA ===")
+    prikazi_preduzeca()
+
     # ── KONTEJNERI ────────────────────────────
     print("=" * 60)
     print("CRUD – KONTEJNERI")
