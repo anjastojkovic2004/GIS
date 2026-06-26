@@ -12,7 +12,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.preprocessing import LabelEncoder
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'model_deponije.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'model', 'model_deponije.pkl')
 
 DB_URL = os.environ.get(
     "DATABASE_URL",
@@ -321,7 +321,7 @@ def prostorne_analize(deponije_df, lokacije_df):
 # 6. Kreiranje mape
 # ─────────────────────────────────────────────
 def kreiraj_mapu(originalne_deponije, ml_deponije_df):
-    mapa = folium.Map(location=[45.2552, 19.8362], zoom_start=12)
+    mapa = folium.Map(location=[45.25, 20.0], zoom_start=7)
 
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
@@ -330,6 +330,26 @@ def kreiraj_mapu(originalne_deponije, ml_deponije_df):
         overlay=False,
         control=True
     ).add_to(mapa)
+
+    # Okvir Srbije iz OSM adminareas SHP
+    shp_dir = os.path.join(os.path.dirname(__file__), '..', 'serbia_shp')
+    try:
+        adminareas = gpd.read_file(os.path.join(shp_dir, 'gis_osm_adminareas_a_free_1.shp'))
+        srbija = adminareas[adminareas['fclass'] == 'national']
+        if not srbija.empty:
+            geom = srbija.iloc[0].geometry
+            if geom.geom_type == 'MultiPolygon':
+                geom = list(geom.geoms)[0]
+            coords = [[y, x] for x, y in geom.exterior.coords]
+            folium.Polygon(
+                locations=coords,
+                color='black',
+                weight=2,
+                fill=False,
+                tooltip='Srbija'
+            ).add_to(mapa)
+    except Exception:
+        pass
 
     fg_orig = folium.FeatureGroup(name='Originalne deponije', show=True)
     for _, row in originalne_deponije.iterrows():
@@ -359,8 +379,9 @@ def kreiraj_mapu(originalne_deponije, ml_deponije_df):
     fg_ml.add_to(mapa)
 
     folium.LayerControl().add_to(mapa)
-    mapa.save('mapa_ml_rezultati.html')
-    print("Mapa sacuvana kao 'mapa_ml_rezultati.html'")
+    out_path = os.path.join(os.path.dirname(__file__), 'mapa_ml_rezultati.html')
+    mapa.save(out_path)
+    print(f"Mapa sacuvana kao '{out_path}'")
 
 
 # ─────────────────────────────────────────────
