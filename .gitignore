@@ -6,6 +6,9 @@ serbia.zip
 # HTML mape
 *.html
 
+# ML model
+deo3_ml/model/
+
 # Python cache
 __pycache__/
 *.pyc
