@@ -6,17 +6,16 @@ import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, box
 import os
+from dotenv import load_dotenv
 
-DB_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
-)
+load_dotenv()
+DB_URL = os.environ.get("DB_URL")
 
 def get_connection():
     return psycopg2.connect(DB_URL)
 
 st.set_page_config(page_title="GIS Upravljanje Otpadom", layout="wide", initial_sidebar_state="expanded")
-st.title("GIS Sistem za upravljanje otpadom — Novi Sad")
+st.title("GIS Sistem za upravljanje otpadom — Vojvodina")
 
 with st.sidebar:
     st.header("Meni")
@@ -75,7 +74,7 @@ if menu == "Dashboard":
     st.divider()
     st.subheader("Mapa lokacija")
 
-    mapa = folium.Map(location=[45.2552, 19.8362], zoom_start=12)
+    mapa = folium.Map(location=[45.25, 20.0], zoom_start=8)
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         attr='Esri World Imagery',
@@ -606,7 +605,7 @@ elif menu == "ML Detekcija":
             WHERE d.naziv LIKE '%ML%' AND d.geom IS NOT NULL
         """, conn)
 
-        mapa_ml = folium.Map(location=[45.2552, 19.8362], zoom_start=12)
+        mapa_ml = folium.Map(location=[45.25, 20.0], zoom_start=8)
         folium.TileLayer(
             tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             attr='Esri',
@@ -655,7 +654,7 @@ elif menu == "Spatial Analiza":
         - Buffer (zaštitna zona 500m)
         - Intersection (lokacije u buffer zonama)
         - Union (spajanje svih zona)
-        - Clip (lokacije unutar Novi Sad oblasti)
+        - Clip (lokacije unutar Vojvodine)
         - Difference (lokacije izvan buffer zona)
 
         **Mapa** — SHP slojevi + podaci iz baze na satelitskoj podlozi.
@@ -741,8 +740,8 @@ elif menu == "Spatial Analiza":
             st.caption("Union spaja sve buffer zone u jedan poligon eliminišući preklapanja.")
 
         # 4. CLIP
-        with st.expander("4. Clip — lokacije unutar oblasti Novog Sada"):
-            clip_box_geom = box(19.7, 45.1, 20.0, 45.4)
+        with st.expander("4. Clip — lokacije unutar Vojvodine"):
+            clip_box_geom = box(18.8, 44.6, 21.7, 46.2)
             gdf_clip_box  = gpd.GeoDataFrame([1], geometry=[clip_box_geom], crs='EPSG:4326')
             clipped = gpd.clip(gdf_lok, gdf_clip_box)
             st.dataframe(
@@ -751,7 +750,7 @@ elif menu == "Spatial Analiza":
                 ),
                 use_container_width=True
             )
-            st.caption(f"{len(clipped)} od {len(gdf_lok)} lokacija je unutar bbox Novog Sada (19.7–20.0°E, 45.1–45.4°N).")
+            st.caption(f"{len(clipped)} od {len(gdf_lok)} lokacija je unutar bbox Vojvodine (18.8–21.7°E, 44.6–46.2°N).")
 
         # 5. DIFFERENCE
         with st.expander("5. Difference — lokacije IZVAN buffer zona"):
@@ -788,7 +787,7 @@ elif menu == "Spatial Analiza":
     """, conn)
     conn.close()
 
-    mapa = folium.Map(location=[45.2552, 19.8362], zoom_start=12)
+    mapa = folium.Map(location=[45.25, 20.0], zoom_start=8)
 
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
@@ -826,7 +825,7 @@ elif menu == "Spatial Analiza":
     if os.path.exists(places_shp):
         try:
             gdf_places = gpd.read_file(places_shp)
-            novi_sad_box = gdf_places.cx[19.6:20.1, 45.1:45.5]
+            novi_sad_box = gdf_places.cx[18.8:21.7, 44.6:46.2]
             fg_places = folium.FeatureGroup(name='OSM Mesta (SHP)', show=False)
             for _, row in novi_sad_box.iterrows():
                 if row.geometry is not None and row.geometry.geom_type == 'Point':
@@ -847,7 +846,7 @@ elif menu == "Spatial Analiza":
     if os.path.exists(landuse_shp):
         try:
             gdf_land = gpd.read_file(landuse_shp)
-            land_clip = gdf_land.cx[19.7:20.0, 45.15:45.40]
+            land_clip = gdf_land.cx[18.8:21.7, 44.6:46.2]
             fg_land = folium.FeatureGroup(name='OSM Korišćenje zemljišta (SHP)', show=False)
             landuse_colors = {
                 'residential': '#f0e68c', 'industrial': '#cd853f',
