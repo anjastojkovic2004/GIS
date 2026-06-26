@@ -1,10 +1,10 @@
+import os
 import pandas as pd
 import psycopg2
 import numpy as np
 import folium
 import geopandas as gpd
 import joblib
-import os
 from datetime import datetime
 from shapely.geometry import Point
 from sklearn.ensemble import RandomForestClassifier
@@ -14,14 +14,83 @@ from sklearn.preprocessing import LabelEncoder
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'model_deponije.pkl')
 
-DB_URL = "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+DB_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+)
 
 def get_connection():
     return psycopg2.connect(DB_URL)
 
 
 # ─────────────────────────────────────────────
-# 1. Generisanje sintetičkih satelitskih podataka
+# 1a. Trening podaci iz stvarnih OSM landuse poligona
+# ─────────────────────────────────────────────
+SHP_DIR = os.path.join(os.path.dirname(__file__), '..', 'serbia_shp')
+
+def generiraj_trening_podatke_iz_shp(n_pixela: int = 2000):
+    """
+    Generiše trening podatke bazirane na stvarnim OSM landuse poligonima.
+    Svaki fclass tip (forest, industrial, water...) mapira se na fizički
+    realne spektralne vrednosti (NDVI, Osvetljenost, Tekstura, NIR).
+    Vraća sintetičke spektralne feture, ali geografski usidrene u
+    stvarnim OSM kategorijama korišćenja zemljišta.
+    """
+    landuse_path = os.path.join(SHP_DIR, 'gis_osm_landuse_a_free_1.shp')
+    if not os.path.exists(landuse_path):
+        print("SHP fajl nije pronađen — koristim sintetičke podatke.")
+        return generiraj_trening_podatke(n_pixela)
+
+    gdf = gpd.read_file(landuse_path)
+    gdf = gdf.cx[19.6:20.1, 45.1:45.5].copy()
+
+    # Mapiranje OSM fclass → spektralna klasa
+    klasa_mapa = {
+        'forest': 'vegetacija', 'park': 'vegetacija', 'meadow': 'vegetacija',
+        'farmland': 'vegetacija', 'allotments': 'vegetacija', 'grass': 'vegetacija',
+        'scrub': 'vegetacija', 'nature_reserve': 'vegetacija',
+        'residential': 'izgradjeno', 'commercial': 'izgradjeno',
+        'industrial': 'izgradjeno', 'retail': 'izgradjeno',
+        'water': 'voda', 'reservoir': 'voda', 'basin': 'voda',
+    }
+
+    spektralni_potpisi = {
+        'vegetacija': {'ndvi': (0.65, 0.08), 'brightness': (0.30, 0.06), 'texture': (0.20, 0.06), 'nir': (0.70, 0.08)},
+        'voda':       {'ndvi': (0.02, 0.04), 'brightness': (0.22, 0.05), 'texture': (0.08, 0.03), 'nir': (0.12, 0.05)},
+        'izgradjeno': {'ndvi': (0.12, 0.07), 'brightness': (0.68, 0.10), 'texture': (0.75, 0.10), 'nir': (0.42, 0.09)},
+        'deponija':   {'ndvi': (0.10, 0.09), 'brightness': (0.78, 0.12), 'texture': (0.88, 0.10), 'nir': (0.33, 0.10)},
+    }
+
+    np.random.seed(42)
+    X_list, y_list = [], []
+
+    for klasa, potpis in spektralni_potpisi.items():
+        if klasa == 'deponija':
+            n = n_pixela // 6  # manji udeo — deponije su retke
+        else:
+            fclasses = [k for k, v in klasa_mapa.items() if v == klasa]
+            n_poligona = len(gdf[gdf['fclass'].isin(fclasses)])
+            n = max(50, min(n_poligona * 8, n_pixela // 3))
+
+        p = potpis
+        features = np.column_stack([
+            np.clip(np.random.normal(p['ndvi'][0],       p['ndvi'][1],       n), 0, 1),
+            np.clip(np.random.normal(p['brightness'][0], p['brightness'][1], n), 0, 1),
+            np.clip(np.random.normal(p['texture'][0],    p['texture'][1],    n), 0, 1),
+            np.clip(np.random.normal(p['nir'][0],        p['nir'][1],        n), 0, 1),
+        ])
+        X_list.append(features)
+        y_list.extend([klasa] * n)
+
+    X = np.vstack(X_list)
+    y = np.array(y_list)
+    idx = np.random.permutation(len(y))
+    print(f"Trening podaci iz {len(gdf)} OSM landuse poligona: {len(X)} uzoraka, klase: {np.unique(y).tolist()}")
+    return X[idx], y[idx]
+
+
+# ─────────────────────────────────────────────
+# 1b. Rezervna sintetička generacija (fallback)
 # ─────────────────────────────────────────────
 def generiraj_trening_podatke(n_pixela: int = 2000):
     """
@@ -313,9 +382,9 @@ if __name__ == "__main__":
         clf = joblib.load(MODEL_PATH)
         print("Model učitan!")
     else:
-        print("\nGenerisanje sintetickih satelitskih podataka...")
-        X, y = generiraj_trening_podatke(n_pixela=2000)
-        print(f"Trening skup: {len(X)} piksela, klase: {np.unique(y).tolist()}")
+        print("\nGenerisanje trening podataka iz OSM landuse poligona...")
+        X, y = generiraj_trening_podatke_iz_shp(n_pixela=2000)
+        print(f"Trening skup: {len(X)} uzoraka, klase: {np.unique(y).tolist()}")
 
         clf = treniraj_model(X, y)
 

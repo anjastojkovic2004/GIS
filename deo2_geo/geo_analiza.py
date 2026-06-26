@@ -7,7 +7,10 @@ import urllib.request
 import zipfile
 import os
 
-DB_URL = "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+DB_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+)
 SHP_DIR = os.path.join(os.path.dirname(__file__), '..', 'serbia_shp')
 
 def get_connection():
