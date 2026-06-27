@@ -1,3 +1,12 @@
+"""
+app.py — Streamlit web aplikacija za GIS upravljanje otpadom u Vojvodini
+Pruža grafički interfejs za:
+- CRUD operacije nad svim tabelama u bazi
+- Spatial analize (buffer, intersection, union, clip, difference)
+- ML detekcija divljih deponija
+- Interaktivne folium mape sa SHP i baza slojevima
+"""
+
 import streamlit as st
 import pandas as pd
 import psycopg2
@@ -8,15 +17,19 @@ from shapely.geometry import Point, box
 import os
 from dotenv import load_dotenv
 
+# Učitava DB_URL iz .env fajla
 load_dotenv()
 DB_URL = os.environ.get("DB_URL")
 
 def get_connection():
+    """Otvara novu konekciju na PostgreSQL/PostGIS bazu."""
     return psycopg2.connect(DB_URL)
 
+# Konfiguracija stranice — wide layout za bolje korišćenje ekrana
 st.set_page_config(page_title="GIS Upravljanje Otpadom", layout="wide", initial_sidebar_state="expanded")
 st.title("GIS Sistem za upravljanje otpadom — Vojvodina")
 
+# ── Bočni meni za navigaciju između stranica ──
 with st.sidebar:
     st.header("Meni")
     menu = st.radio("Izaberi opciju:", [
@@ -31,7 +44,7 @@ with st.sidebar:
     ])
 
 # ─────────────────────────────────────────────
-# DASHBOARD
+# DASHBOARD — pregled sistema
 # ─────────────────────────────────────────────
 if menu == "Dashboard":
     st.header("Dashboard")
@@ -48,15 +61,18 @@ if menu == "Dashboard":
 
     conn = get_connection()
 
-    lokacije_cnt  = pd.read_sql("SELECT COUNT(*) as broj FROM lokacije", conn).iloc[0]['broj']
+    # Statistike — COUNT upiti za svaku tabelu
+    lokacije_cnt   = pd.read_sql("SELECT COUNT(*) as broj FROM lokacije", conn).iloc[0]['broj']
     kontejneri_cnt = pd.read_sql("SELECT COUNT(*) as broj FROM kontejneri", conn).iloc[0]['broj']
-    deponije_cnt  = pd.read_sql("SELECT COUNT(*) as broj FROM deponije", conn).iloc[0]['broj']
+    deponije_cnt   = pd.read_sql("SELECT COUNT(*) as broj FROM deponije", conn).iloc[0]['broj']
 
+    # Distribucija stanja kontejnera i statusa deponija za grafikone
     stanje_stats = pd.read_sql("SELECT stanje, COUNT(*) as broj FROM kontejneri GROUP BY stanje", conn)
     status_stats = pd.read_sql("SELECT status, COUNT(*) as broj FROM deponije GROUP BY status", conn)
     lokacije_data = pd.read_sql("SELECT id, naziv, ST_X(geom) as lon, ST_Y(geom) as lat FROM lokacije", conn)
     conn.close()
 
+    # Metrike u 3 kolone
     col1, col2, col3 = st.columns(3)
     col1.metric("Lokacije", int(lokacije_cnt))
     col2.metric("Kontejneri", int(kontejneri_cnt))
@@ -74,6 +90,7 @@ if menu == "Dashboard":
     st.divider()
     st.subheader("Mapa lokacija")
 
+    # Osnovna mapa sa satelitskom podlogom i markerima lokacija
     mapa = folium.Map(location=[45.25, 20.0], zoom_start=8)
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
@@ -94,7 +111,7 @@ if menu == "Dashboard":
     st_folium(mapa, width=700, height=500)
 
 # ─────────────────────────────────────────────
-# LOKACIJE
+# LOKACIJE — CRUD
 # ─────────────────────────────────────────────
 elif menu == "Lokacije":
     st.header("Lokacije")
@@ -110,11 +127,13 @@ elif menu == "Lokacije":
 
     conn = get_connection()
 
+    # READ — prikaz svih lokacija
     st.subheader("Sve lokacije")
     lokacije_df = pd.read_sql("SELECT id, naziv, opstina, adresa, tip_podrucja FROM lokacije ORDER BY id", conn)
     st.dataframe(lokacije_df, use_container_width=True)
 
     st.divider()
+    # CREATE — forma za dodavanje nove lokacije
     st.subheader("Dodaj novu lokaciju")
     col1, col2 = st.columns(2)
     with col1:
@@ -132,6 +151,7 @@ elif menu == "Lokacije":
     if st.button("Spremi lokaciju"):
         if naziv and opstina and adresa:
             cursor = conn.cursor()
+            # ST_SetSRID(ST_MakePoint(lon, lat), 4326) kreira PostGIS tačku u WGS84
             cursor.execute("""
                 INSERT INTO lokacije (naziv, opstina, adresa, tip_podrucja, geom)
                 VALUES (%s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
@@ -144,6 +164,7 @@ elif menu == "Lokacije":
             st.error("Popuni sve obavezne podatke!")
 
     st.divider()
+    # UPDATE — forma za ažuriranje lokacije
     st.subheader("Ažuriraj lokaciju")
     col1, col2 = st.columns(2)
     with col1:
@@ -169,6 +190,7 @@ elif menu == "Lokacije":
             st.error("Popuni sve polja za ažuriranje!")
 
     st.divider()
+    # DELETE — brisanje lokacije po ID-u
     st.subheader("Obriši lokaciju")
     id_brisanje = st.number_input("ID lokacije za brisanje", min_value=1, step=1, key="del_lok")
     if st.button("Obriši lokaciju", key="btn_del_lok"):
@@ -182,7 +204,7 @@ elif menu == "Lokacije":
     conn.close()
 
 # ─────────────────────────────────────────────
-# KOMUNALNA PREDUZEĆA
+# KOMUNALNA PREDUZEĆA — CRUD
 # ─────────────────────────────────────────────
 elif menu == "Komunalna Preduzeća":
     st.header("Komunalna Preduzeća")
@@ -198,6 +220,7 @@ elif menu == "Komunalna Preduzeća":
 
     conn = get_connection()
 
+    # READ — prikaz svih preduzeća sa JOIN na lokacije
     st.subheader("Sva komunalna preduzeća")
     preduzeca_df = pd.read_sql("""
         SELECT kp.id, kp.naziv, kp.kontakt_telefon, kp.email,
@@ -209,15 +232,16 @@ elif menu == "Komunalna Preduzeća":
     st.dataframe(preduzeca_df, use_container_width=True)
 
     st.divider()
+    # CREATE — forma za dodavanje novog preduzeća
     st.subheader("Dodaj novo preduzeće")
     lokacije_list = pd.read_sql("SELECT id, naziv FROM lokacije ORDER BY naziv", conn)
     col1, col2 = st.columns(2)
     with col1:
-        pred_naziv   = st.text_input("Naziv preduzeća")
-        pred_tel     = st.text_input("Kontakt telefon")
+        pred_naziv = st.text_input("Naziv preduzeća")
+        pred_tel   = st.text_input("Kontakt telefon")
     with col2:
-        pred_email   = st.text_input("Email")
-        pred_zona    = st.text_input("Zona pokrivenosti")
+        pred_email = st.text_input("Email")
+        pred_zona  = st.text_input("Zona pokrivenosti")
 
     if len(lokacije_list) > 0:
         pred_lokacija = st.selectbox("Lokacija", lokacije_list['naziv'].tolist(), key="pred_lok")
@@ -227,6 +251,7 @@ elif menu == "Komunalna Preduzeća":
 
     if st.button("Spremi preduzeće"):
         if pred_naziv and pred_tel and pred_lokacija:
+            # Pretraži ID lokacije po odabranom nazivu
             lok_id = int(lokacije_list[lokacije_list['naziv'] == pred_lokacija]['id'].values[0])
             cursor = conn.cursor()
             cursor.execute("""
@@ -241,6 +266,7 @@ elif menu == "Komunalna Preduzeća":
             st.error("Popuni naziv, telefon i lokaciju!")
 
     st.divider()
+    # UPDATE — parcijalno ažuriranje (samo polja koja nisu prazna)
     st.subheader("Ažuriraj preduzeće")
     col1, col2 = st.columns(2)
     with col1:
@@ -253,10 +279,11 @@ elif menu == "Komunalna Preduzeća":
     if st.button("Ažuriraj preduzeće"):
         if upd_pred_tel or upd_pred_email or upd_pred_zona:
             cursor = conn.cursor()
+            # COALESCE(NULLIF(novo,''), staro) — ako je novo polje prazno, zadrži staru vrednost
             cursor.execute("""
                 UPDATE komunalna_preduzeca
-                SET kontakt_telefon = COALESCE(NULLIF(%s,''), kontakt_telefon),
-                    email           = COALESCE(NULLIF(%s,''), email),
+                SET kontakt_telefon   = COALESCE(NULLIF(%s,''), kontakt_telefon),
+                    email             = COALESCE(NULLIF(%s,''), email),
                     zona_pokrivenosti = COALESCE(NULLIF(%s,''), zona_pokrivenosti)
                 WHERE id = %s
             """, (upd_pred_tel, upd_pred_email, upd_pred_zona, int(upd_pred_id)))
@@ -268,6 +295,7 @@ elif menu == "Komunalna Preduzeća":
             st.error("Unesi bar jedno polje za ažuriranje!")
 
     st.divider()
+    # DELETE
     st.subheader("Obriši preduzeće")
     del_pred_id = st.number_input("ID preduzeća za brisanje", min_value=1, step=1, key="del_pred")
     if st.button("Obriši preduzeće"):
@@ -281,7 +309,7 @@ elif menu == "Komunalna Preduzeća":
     conn.close()
 
 # ─────────────────────────────────────────────
-# KONTEJNERI
+# KONTEJNERI — CRUD
 # ─────────────────────────────────────────────
 elif menu == "Kontejneri":
     st.header("Kontejneri")
@@ -296,6 +324,7 @@ elif menu == "Kontejneri":
 
     conn = get_connection()
 
+    # READ — svi kontejneri sa lokacijom
     st.subheader("Svi kontejneri")
     kontejneri_df = pd.read_sql("""
         SELECT k.id, k.tip, k.kapacitet_litara, k.stanje, k.datum_postavljanja,
@@ -307,11 +336,12 @@ elif menu == "Kontejneri":
     st.dataframe(kontejneri_df, use_container_width=True)
 
     st.divider()
+    # CREATE
     st.subheader("Dodaj novi kontejner")
     col1, col2 = st.columns(2)
     lokacije_list = pd.read_sql("SELECT id, naziv FROM lokacije ORDER BY naziv", conn)
     with col1:
-        tip      = st.selectbox("Tip kontejnera", ["komunalni", "reciklažni", "podzemni"])
+        tip       = st.selectbox("Tip kontejnera", ["komunalni", "reciklažni", "podzemni"])
         kapacitet = st.number_input("Kapacitet (litara)", min_value=100, step=100, value=1100)
     with col2:
         stanje  = st.selectbox("Stanje", ["dobro", "oštećen", "loše"])
@@ -325,6 +355,7 @@ elif menu == "Kontejneri":
         if lokacija:
             lokacija_id = int(lokacije_list[lokacije_list['naziv'] == lokacija]['id'].values[0])
             cursor = conn.cursor()
+            # NOW() upisuje trenutni datum kao datum postavljanja
             cursor.execute("""
                 INSERT INTO kontejneri (tip, kapacitet_litara, stanje, datum_postavljanja, lokacija_id)
                 VALUES (%s, %s, %s, NOW(), %s)
@@ -335,6 +366,7 @@ elif menu == "Kontejneri":
             st.rerun()
 
     st.divider()
+    # UPDATE — samo stanje se može menjati
     st.subheader("Ažuriraj stanje kontejnera")
     col1, col2 = st.columns(2)
     with col1:
@@ -350,6 +382,7 @@ elif menu == "Kontejneri":
         st.rerun()
 
     st.divider()
+    # DELETE
     st.subheader("Obriši kontejner")
     del_id = st.number_input("ID kontejnera za brisanje", min_value=1, step=1, key="del_k")
     if st.button("Obriši kontejner"):
@@ -363,7 +396,7 @@ elif menu == "Kontejneri":
     conn.close()
 
 # ─────────────────────────────────────────────
-# DEPONIJE
+# DEPONIJE — CRUD
 # ─────────────────────────────────────────────
 elif menu == "Deponije":
     st.header("Deponije")
@@ -378,6 +411,7 @@ elif menu == "Deponije":
 
     conn = get_connection()
 
+    # READ — sve deponije sa lokacijom
     st.subheader("Sve deponije")
     deponije_df = pd.read_sql("""
         SELECT d.id, d.naziv, d.povrsina_m2, d.tip_otpada, d.status, d.datum_otkrivanja,
@@ -389,6 +423,7 @@ elif menu == "Deponije":
     st.dataframe(deponije_df, use_container_width=True)
 
     st.divider()
+    # CREATE — geometrija se kreira kao buffer oko koordinata lokacije
     st.subheader("Prijavi novu deponiju")
     col1, col2 = st.columns(2)
     lokacije_list = pd.read_sql("SELECT id, naziv FROM lokacije ORDER BY naziv", conn)
@@ -409,6 +444,7 @@ elif menu == "Deponije":
         if naziv and povrsina > 0 and lokacija:
             lokacija_id = int(lokacije_list[lokacije_list['naziv'] == lokacija]['id'].values[0])
             cursor = conn.cursor()
+            # INSERT...SELECT preuzima koordinate iz tabele lokacije i kreira buffer poligon
             cursor.execute("""
                 INSERT INTO deponije (naziv, povrsina_m2, tip_otpada, status,
                     datum_otkrivanja, lokacija_id, geom)
@@ -424,6 +460,7 @@ elif menu == "Deponije":
             st.error("Popuni sve podatke!")
 
     st.divider()
+    # UPDATE — samo status
     st.subheader("Ažuriraj status deponije")
     col1, col2 = st.columns(2)
     with col1:
@@ -439,10 +476,12 @@ elif menu == "Deponije":
         st.rerun()
 
     st.divider()
+    # DELETE — briše i inspekcije zbog FK constraint-a
     st.subheader("Obriši deponiju")
     del_dep_id = st.number_input("ID deponije za brisanje", min_value=1, step=1, key="del_dep")
     if st.button("Obriši deponiju"):
         cursor = conn.cursor()
+        # Inspekcije se moraju obrisati prve (strani ključ na deponiju)
         cursor.execute("DELETE FROM inspekcije WHERE deponija_id = %s", (int(del_dep_id),))
         cursor.execute("DELETE FROM deponije WHERE id = %s", (int(del_dep_id),))
         conn.commit()
@@ -453,7 +492,7 @@ elif menu == "Deponije":
     conn.close()
 
 # ─────────────────────────────────────────────
-# INSPEKCIJE
+# INSPEKCIJE — CRUD
 # ─────────────────────────────────────────────
 elif menu == "Inspekcije":
     st.header("Inspekcije")
@@ -468,6 +507,7 @@ elif menu == "Inspekcije":
 
     conn = get_connection()
 
+    # READ — inspekcije sa statusom deponije
     st.subheader("Sve inspekcije")
     inspekcije_df = pd.read_sql("""
         SELECT i.id, i.datum, i.inspektor, i.nalaz, i.preporuka,
@@ -479,12 +519,13 @@ elif menu == "Inspekcije":
     st.dataframe(inspekcije_df, use_container_width=True)
 
     st.divider()
+    # CREATE
     st.subheader("Dodaj novu inspekciju")
     deponije_list = pd.read_sql("SELECT id, naziv FROM deponije ORDER BY naziv", conn)
 
     col1, col2 = st.columns(2)
     with col1:
-        ins_datum    = st.date_input("Datum inspekcije")
+        ins_datum     = st.date_input("Datum inspekcije")
         ins_inspektor = st.text_input("Inspektor")
     with col2:
         ins_nalaz     = st.text_area("Nalaz", height=80)
@@ -512,6 +553,7 @@ elif menu == "Inspekcije":
             st.error("Popuni inspektor, nalaz i deponiju!")
 
     st.divider()
+    # UPDATE — samo preporuka
     st.subheader("Ažuriraj preporuku")
     col1, col2 = st.columns(2)
     with col1:
@@ -527,6 +569,7 @@ elif menu == "Inspekcije":
         st.rerun()
 
     st.divider()
+    # DELETE
     st.subheader("Obriši inspekciju")
     del_ins_id = st.number_input("ID inspekcije za brisanje", min_value=1, step=1, key="del_ins")
     if st.button("Obriši inspekciju"):
@@ -540,7 +583,7 @@ elif menu == "Inspekcije":
     conn.close()
 
 # ─────────────────────────────────────────────
-# ML DETEKCIJA
+# ML DETEKCIJA — pregled i upravljanje ML rezultatima
 # ─────────────────────────────────────────────
 elif menu == "ML Detekcija":
     st.header("ML Detekcija divljih deponija")
@@ -550,9 +593,8 @@ elif menu == "ML Detekcija":
         Stranica za pregled i upravljanje ML detektovanim divljim deponijama.
 
         **Kako funkcioniše ML detekcija?**
-        Algoritam Random Forest se trenira na sintetičkim multispektralnim podacima
-        (simulacija NDVI, osvetljenosti, teksture, NIR kanala satelitskog snimka).
-        Pikseli klasifikovani kao "deponija" grupišu se u objekte i upisuju u bazu.
+        Algoritam Random Forest se trenira na spektralnim podacima baziranim na OSM landuse kategorijama
+        (NDVI, osvetljenost, tekstura, NIR kanali). Pikseli klasifikovani kao "deponija" upisuju se u bazu.
 
         - **Confidence** — sigurnost modela (0–1); viša vrednost = pouzdanija detekcija
         - Možeš **ažurirati tip otpada** i **status** svake ML deponije
@@ -560,10 +602,10 @@ elif menu == "ML Detekcija":
 
     conn = get_connection()
 
+    # Prikaz samo ML deponija — identifikovane po 'ML' u nazivu
     ml_deponije = pd.read_sql("""
         SELECT d.id, d.naziv, d.povrsina_m2, d.tip_otpada, d.status,
-               d.datum_otkrivanja,
-               l.naziv as lokacija
+               d.datum_otkrivanja, l.naziv as lokacija
         FROM deponije d
         JOIN lokacije l ON d.lokacija_id = l.id
         WHERE d.naziv LIKE '%ML%'
@@ -575,6 +617,7 @@ elif menu == "ML Detekcija":
         st.dataframe(ml_deponije, use_container_width=True)
 
         st.divider()
+        # UPDATE — ažuriranje tipa i statusa ML deponije
         st.subheader("Ažuriraj atribute ML deponije")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -596,6 +639,7 @@ elif menu == "ML Detekcija":
             st.rerun()
 
         st.divider()
+        # Mapa ML deponija — boja markera po statusu
         st.subheader("Mapa ML detektovanih deponija")
         ml_coords = pd.read_sql("""
             SELECT d.naziv, d.tip_otpada, d.status, d.povrsina_m2,
@@ -616,6 +660,7 @@ elif menu == "ML Detekcija":
 
         fg_ml = folium.FeatureGroup(name='ML deponije', show=True)
         for _, row in ml_coords.iterrows():
+            # Boja markera zavisi od statusa detekcije
             color = 'red' if row['status'] == 'detektovana' else (
                     'orange' if row['status'] == 'potvrđena' else 'green')
             folium.CircleMarker(
@@ -625,10 +670,7 @@ elif menu == "ML Detekcija":
                        f"Tip: {row['tip_otpada']}<br>"
                        f"Status: {row['status']}<br>"
                        f"Površina: {row['povrsina_m2']:.0f} m²"),
-                color=color,
-                fill=True,
-                fillColor=color,
-                fillOpacity=0.6
+                color=color, fill=True, fillColor=color, fillOpacity=0.6
             ).add_to(fg_ml)
         fg_ml.add_to(mapa_ml)
         folium.LayerControl().add_to(mapa_ml)
@@ -639,7 +681,7 @@ elif menu == "ML Detekcija":
     conn.close()
 
 # ─────────────────────────────────────────────
-# SPATIAL ANALIZA
+# SPATIAL ANALIZA — prostorne operacije i mapa
 # ─────────────────────────────────────────────
 elif menu == "Spatial Analiza":
     st.header("Spatial Analiza")
@@ -662,7 +704,7 @@ elif menu == "Spatial Analiza":
 
     conn = get_connection()
 
-    # ── Distanca ──────────────────────────────
+    # ── Distanca između dve lokacije ──────────
     st.subheader("Distanca između lokacija")
     lokacije_list = pd.read_sql("SELECT id, naziv FROM lokacije ORDER BY naziv", conn)
 
@@ -678,6 +720,7 @@ elif menu == "Spatial Analiza":
             loc2_id = int(lokacije_list[lokacije_list['naziv'] == loc2]['id'].values[0])
 
             cursor = conn.cursor()
+            # ST_Distance sa ::geography kastom računa distancu u metrima (geodetska linija)
             cursor.execute("""
                 SELECT ST_Distance(
                     (SELECT geom FROM lokacije WHERE id = %s)::geography,
@@ -692,24 +735,28 @@ elif menu == "Spatial Analiza":
 
     st.divider()
 
-    # ── Overlay Operacije ─────────────────────
+    # ── 5 Overlay Operacija ───────────────────
     st.subheader("Overlay Operacije (5 prostornih analiza)")
 
+    # Učitaj lokacije sa koordinatama za geopandas operacije
     lokacije_geo = pd.read_sql(
         "SELECT id, naziv, ST_X(geom) as lon, ST_Y(geom) as lat FROM lokacije", conn
     )
 
     if not lokacije_geo.empty:
-        # Kreiraj GeoDataFrame lokacija
+        # Kreiraj GeoDataFrame od lokacija (tačke u WGS84)
         geometry = [Point(row['lon'], row['lat']) for _, row in lokacije_geo.iterrows()]
         gdf_lok = gpd.GeoDataFrame(lokacije_geo.copy(), geometry=geometry, crs='EPSG:4326')
+        # UTM projekcija za tačne metre u buffer operaciji
         gdf_lok_utm = gdf_lok.to_crs('EPSG:32634')
 
-        # 1. BUFFER
+        # 1. BUFFER — zaštitna zona 500m oko svake lokacije
         with st.expander("1. Buffer — zaštitna zona 500m oko svake lokacije"):
             gdf_buf_utm = gdf_lok_utm.copy()
             gdf_buf_utm['geometry'] = gdf_lok_utm.geometry.buffer(500)
+            # Vrati u WGS84 za prikaz i daljnje operacije
             gdf_buf = gdf_buf_utm.to_crs('EPSG:4326')
+            # Površina se računa u UTM (ha = m² / 10000)
             gdf_buf['povrsina_ha'] = (gdf_buf_utm.geometry.area / 10000).round(2)
             st.dataframe(
                 gdf_buf[['naziv', 'povrsina_ha']].rename(columns={'povrsina_ha': 'Površina zone (ha)'}),
@@ -717,9 +764,10 @@ elif menu == "Spatial Analiza":
             )
             st.caption(f"Ukupna kombinovana površina svih zona: {gdf_buf_utm.geometry.area.sum()/10000:.2f} ha")
 
-        # 2. INTERSECTION
+        # 2. INTERSECTION — koje lokacije ulaze u buffer zonu druge lokacije
         with st.expander("2. Intersection — lokacije unutar buffer zona"):
             joined = gpd.sjoin(gdf_lok, gdf_buf[['naziv', 'geometry']], how='inner', predicate='intersects')
+            # Filtriramo lokaciju koja ne ulazi u svoju sopstvenu zonu
             joined = joined[joined['naziv_left'] != joined['naziv_right']]
             if joined.empty:
                 st.info("Nijedna lokacija ne ulazi u buffer zonu druge lokacije.")
@@ -732,30 +780,31 @@ elif menu == "Spatial Analiza":
                 )
                 st.caption(f"Pronađeno {len(joined)} preklapanja.")
 
-        # 3. UNION
+        # 3. UNION — spajanje svih buffer zona u jednu bez preklapanja
         with st.expander("3. Union — spajanje svih buffer zona u jednu"):
+            # unary_union spaja sve geometrije u jednu
             union_geom = gdf_buf_utm.geometry.unary_union
             union_area_ha = union_geom.area / 10000
             st.metric("Ukupna površina unije svih zona", f"{union_area_ha:.2f} ha")
             st.caption("Union spaja sve buffer zone u jedan poligon eliminišući preklapanja.")
 
-        # 4. CLIP
+        # 4. CLIP — lokacije unutar bounding box Vojvodine
         with st.expander("4. Clip — lokacije unutar Vojvodine"):
+            # box() kreira pravougaoni poligon od min/max koordinata
             clip_box_geom = box(18.8, 44.6, 21.7, 46.2)
             gdf_clip_box  = gpd.GeoDataFrame([1], geometry=[clip_box_geom], crs='EPSG:4326')
             clipped = gpd.clip(gdf_lok, gdf_clip_box)
             st.dataframe(
-                clipped[['naziv', 'lon', 'lat']].rename(
-                    columns={'lon': 'Lon', 'lat': 'Lat'}
-                ),
+                clipped[['naziv', 'lon', 'lat']].rename(columns={'lon': 'Lon', 'lat': 'Lat'}),
                 use_container_width=True
             )
-            st.caption(f"{len(clipped)} od {len(gdf_lok)} lokacija je unutar bbox Vojvodine (18.8–21.7°E, 44.6–46.2°N).")
+            st.caption(f"{len(clipped)} od {len(gdf_lok)} lokacija je unutar bbox Vojvodine.")
 
-        # 5. DIFFERENCE
+        # 5. DIFFERENCE — lokacije koje su van tuđih buffer zona
         with st.expander("5. Difference — lokacije IZVAN buffer zona"):
             joined_all = gpd.sjoin(gdf_lok, gdf_buf[['naziv', 'geometry']], how='left', predicate='intersects')
-            # Lokacije koje ne ulaze ni u jednu tuđu zonu
+            # index_right IS NULL = lokacija nije ni u jednoj zoni
+            # naziv_left == naziv_right = lokacija je samo u svojoj zoni
             outside = joined_all[
                 joined_all['index_right'].isna() |
                 (joined_all['naziv_left'] == joined_all['naziv_right'])
@@ -763,6 +812,7 @@ elif menu == "Spatial Analiza":
             if outside.empty:
                 st.info("Sve lokacije se nalaze unutar buffer zona.")
             else:
+                # naziv_left jer sjoin preimeuje kolone kada oba DF-a imaju 'naziv'
                 st.dataframe(
                     outside[['naziv_left', 'lon', 'lat']].rename(columns={'naziv_left': 'naziv'}),
                     use_container_width=True
@@ -773,12 +823,13 @@ elif menu == "Spatial Analiza":
 
     st.divider()
 
-    # ── Mapa sa SHP slojevima ─────────────────
+    # ── Mapa sa SHP slojevima i bazom ─────────
     st.subheader("Mapa sa SHP slojevima i satelitskom podlogom")
 
     lokacije_data = pd.read_sql(
         "SELECT id, naziv, ST_X(geom) as lon, ST_Y(geom) as lat FROM lokacije", conn
     )
+    # ST_Centroid za deponije jer su poligoni — uzima centroid za prikaz markera
     deponije_data = pd.read_sql("""
         SELECT naziv, tip_otpada, status, povrsina_m2,
                ST_X(ST_Centroid(geom)) as lon,
@@ -789,6 +840,7 @@ elif menu == "Spatial Analiza":
 
     mapa = folium.Map(location=[45.25, 20.0], zoom_start=8)
 
+    # Raster podloga — satelitski snimak
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         attr='Esri World Imagery',
@@ -798,7 +850,7 @@ elif menu == "Spatial Analiza":
     ).add_to(mapa)
     folium.TileLayer('OpenStreetMap', name='OpenStreetMap', overlay=False, control=True).add_to(mapa)
 
-    # Buffer zone sloj na mapi
+    # Buffer zone sloj — podrazumevano isključen
     if not lokacije_geo.empty:
         fg_buf = folium.FeatureGroup(name='Buffer zone 500m', show=False)
         for _, row in gdf_buf.iterrows():
@@ -819,12 +871,13 @@ elif menu == "Spatial Analiza":
                 ).add_to(fg_buf)
         fg_buf.add_to(mapa)
 
-    # SHP sloj — mesta (places)
+    # SHP sloj — OSM mesta (tačke), podrazumevano isključen
     shp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'serbia_shp')
     places_shp = os.path.join(shp_dir, 'gis_osm_places_free_1.shp')
     if os.path.exists(places_shp):
         try:
             gdf_places = gpd.read_file(places_shp)
+            # Filtriraj na bbox Vojvodine
             novi_sad_box = gdf_places.cx[18.8:21.7, 44.6:46.2]
             fg_places = folium.FeatureGroup(name='OSM Mesta (SHP)', show=False)
             for _, row in novi_sad_box.iterrows():
@@ -833,15 +886,13 @@ elif menu == "Spatial Analiza":
                         location=[row.geometry.y, row.geometry.x],
                         radius=4,
                         popup=str(row.get('name', '')),
-                        color='purple',
-                        fill=True,
-                        fillOpacity=0.6
+                        color='purple', fill=True, fillOpacity=0.6
                     ).add_to(fg_places)
             fg_places.add_to(mapa)
         except Exception:
-            pass
+            pass  # Preskoči ako SHP fajl nije validan
 
-    # SHP sloj — korišćenje zemljišta
+    # SHP sloj — OSM korišćenje zemljišta (poligoni), podrazumevano isključen
     landuse_shp = os.path.join(shp_dir, 'gis_osm_landuse_a_free_1.shp')
     if os.path.exists(landuse_shp):
         try:
@@ -857,8 +908,8 @@ elif menu == "Spatial Analiza":
                 if row.geometry is not None:
                     ftype = row.get('fclass', 'other')
                     color = landuse_colors.get(ftype, '#cccccc')
-                    coords = []
                     geom = row.geometry
+                    coords = []
                     if geom.geom_type == 'Polygon':
                         coords = [[y, x] for x, y in geom.exterior.coords]
                     elif geom.geom_type == 'MultiPolygon':
@@ -873,7 +924,7 @@ elif menu == "Spatial Analiza":
         except Exception:
             pass
 
-    # Sloj — lokacije iz baze
+    # Sloj — lokacije iz baze (plavi markeri)
     fg_lok = folium.FeatureGroup(name='Lokacije (baza)', show=True)
     for _, row in lokacije_data.iterrows():
         folium.Marker(
@@ -884,9 +935,10 @@ elif menu == "Spatial Analiza":
         ).add_to(fg_lok)
     fg_lok.add_to(mapa)
 
-    # Sloj — deponije iz baze
+    # Sloj — deponije iz baze (markeri boje po statusu)
     fg_dep = folium.FeatureGroup(name='Deponije (baza)', show=True)
     for _, row in deponije_data.iterrows():
+        # Crveno = aktivna, narandžasto = u sanaciji, zeleno = sanirana
         color = 'red' if row['status'] == 'aktivna' else ('orange' if row['status'] == 'u sanaciji' else 'green')
         folium.CircleMarker(
             location=[row['lat'], row['lon']],
@@ -899,5 +951,6 @@ elif menu == "Spatial Analiza":
         ).add_to(fg_dep)
     fg_dep.add_to(mapa)
 
+    # Kontrola slojeva — dugme za uključivanje/isključivanje
     folium.LayerControl(collapsed=False).add_to(mapa)
     st_folium(mapa, width=750, height=550)

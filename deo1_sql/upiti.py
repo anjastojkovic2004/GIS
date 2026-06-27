@@ -1,7 +1,14 @@
+"""
+upiti.py — SQL upiti nad PostgreSQL/PostGIS bazom
+Demonstrira 10 JOIN upita sa WHERE filterima, GROUP BY i agregacijama.
+Baza je hostovana na Supabase cloud platformi.
+"""
+
 import psycopg2
 import pandas as pd
 import os
 
+# URL konekcije se učitava iz env varijable, uz fallback na hardkodirani string
 DB_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
@@ -12,7 +19,10 @@ def get_connection():
 
 conn = get_connection()
 
-# 1. Kontejneri sa lokacijama
+# ─────────────────────────────────────────────
+# UPIT 1: Kontejneri sa lokacijama
+# JOIN kontejneri ↔ lokacije — prikazuje tip, kapacitet i stanje svakog kontejnera
+# ─────────────────────────────────────────────
 print("=== 1. Kontejneri sa lokacijama ===")
 df1 = pd.read_sql("""
     SELECT k.id, k.tip, k.kapacitet_litara, k.stanje, l.naziv as lokacija, l.tip_podrucja
@@ -21,7 +31,10 @@ df1 = pd.read_sql("""
 """, conn)
 print(df1)
 
-# 2. Aktivne deponije
+# ─────────────────────────────────────────────
+# UPIT 2: Aktivne deponije
+# WHERE filter — prikazuje samo deponije sa statusom 'aktivna'
+# ─────────────────────────────────────────────
 print("\n=== 2. Aktivne deponije ===")
 df2 = pd.read_sql("""
     SELECT d.naziv, d.povrsina_m2, d.tip_otpada, l.naziv as lokacija
@@ -31,7 +44,10 @@ df2 = pd.read_sql("""
 """, conn)
 print(df2)
 
-# 3. Inspekcije sa deponijama
+# ─────────────────────────────────────────────
+# UPIT 3: Inspekcije sa deponijama
+# JOIN inspekcije ↔ deponije, sortirano po datumu (najnovije prve)
+# ─────────────────────────────────────────────
 print("\n=== 3. Inspekcije sa deponijama ===")
 df3 = pd.read_sql("""
     SELECT i.datum, i.inspektor, i.nalaz, d.naziv as deponija
@@ -41,7 +57,10 @@ df3 = pd.read_sql("""
 """, conn)
 print(df3)
 
-# 4. Preduzeca sa lokacijama
+# ─────────────────────────────────────────────
+# UPIT 4: Preduzeća sa lokacijama
+# JOIN komunalna_preduzeca ↔ lokacije
+# ─────────────────────────────────────────────
 print("\n=== 4. Preduzeca sa lokacijama ===")
 df4 = pd.read_sql("""
     SELECT kp.naziv as preduzece, kp.zona_pokrivenosti, l.naziv as lokacija, l.tip_podrucja
@@ -50,7 +69,10 @@ df4 = pd.read_sql("""
 """, conn)
 print(df4)
 
-# 5. Osteceni kontejneri
+# ─────────────────────────────────────────────
+# UPIT 5: Oštećeni i loši kontejneri
+# WHERE sa IN operatorom — filtrira više vrednosti odjednom
+# ─────────────────────────────────────────────
 print("\n=== 5. Osteceni kontejneri ===")
 df5 = pd.read_sql("""
     SELECT k.tip, k.stanje, l.naziv as lokacija, l.adresa
@@ -60,7 +82,10 @@ df5 = pd.read_sql("""
 """, conn)
 print(df5)
 
-# 6. Deponije + inspekcije + lokacije
+# ─────────────────────────────────────────────
+# UPIT 6: Deponije + inspekcije + lokacije (trostruki JOIN)
+# Prikazuje samo deponije veće od 200 m² koje imaju bar jednu inspekciju
+# ─────────────────────────────────────────────
 print("\n=== 6. Deponije, inspekcije i lokacije ===")
 df6 = pd.read_sql("""
     SELECT d.naziv as deponija, l.naziv as lokacija, i.datum, i.inspektor, i.preporuka
@@ -71,7 +96,11 @@ df6 = pd.read_sql("""
 """, conn)
 print(df6)
 
-# 7. Broj kontejnera i ukupni kapacitet po lokaciji
+# ─────────────────────────────────────────────
+# UPIT 7: Agregacija — broj kontejnera i ukupni kapacitet po lokaciji
+# GROUP BY + COUNT + SUM + LEFT JOIN (uključuje lokacije bez kontejnera)
+# COALESCE zamenjuje NULL sa 0 kada nema kontejnera na lokaciji
+# ─────────────────────────────────────────────
 print("\n=== 7. Broj kontejnera i ukupni kapacitet po lokaciji ===")
 df7 = pd.read_sql("""
     SELECT l.naziv as lokacija, l.opstina,
@@ -84,7 +113,10 @@ df7 = pd.read_sql("""
 """, conn)
 print(df7)
 
-# 8. Najnovija inspekcija po deponiji sa statusom
+# ─────────────────────────────────────────────
+# UPIT 8: Poslednja inspekcija po deponiji
+# GROUP BY + MAX (datum) + COUNT — statistike inspekcija po deponiji
+# ─────────────────────────────────────────────
 print("\n=== 8. Poslednja inspekcija po deponiji ===")
 df8 = pd.read_sql("""
     SELECT d.naziv as deponija, d.status,
@@ -97,7 +129,10 @@ df8 = pd.read_sql("""
 """, conn)
 print(df8)
 
-# 9. Lokacije bez kontejnera (LEFT JOIN + IS NULL)
+# ─────────────────────────────────────────────
+# UPIT 9: Lokacije bez kontejnera
+# LEFT JOIN + IS NULL — anti-join obrazac za pronalaženje "praznih" lokacija
+# ─────────────────────────────────────────────
 print("\n=== 9. Lokacije bez kontejnera ===")
 df9 = pd.read_sql("""
     SELECT l.naziv, l.opstina, l.tip_podrucja
@@ -107,7 +142,11 @@ df9 = pd.read_sql("""
 """, conn)
 print(df9)
 
-# 10. Sveobuhvatni izveštaj — kontejneri, deponije i inspekcije po lokaciji
+# ─────────────────────────────────────────────
+# UPIT 10: Sveobuhvatni izveštaj po lokaciji
+# Trostruki LEFT JOIN sa COUNT DISTINCT da se izbjegne dupliranje redova
+# COALESCE(SUM(DISTINCT ...), 0) — ukupna površina bez duplikata
+# ─────────────────────────────────────────────
 print("\n=== 10. Sveobuhvatni izveštaj po lokaciji ===")
 df10 = pd.read_sql("""
     SELECT l.naziv as lokacija, l.opstina,
