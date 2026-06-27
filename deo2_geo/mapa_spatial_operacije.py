@@ -40,11 +40,8 @@ def kreiraj_mapu_spatial(lokacije_df):
     """
     print("Pravljenje mape sa spatial operacijama...")
 
-    mapa = folium.Map(
-        location=[45.25, 20.0],  # Centar nad Vojvodinom
-        zoom_start=8,
-        tiles='OpenStreetMap'
-    )
+    mapa = folium.Map(tiles='OpenStreetMap')
+    mapa.fit_bounds([[44.6, 18.8], [46.2, 21.7]])
 
     # ── Kreiraj buffer zone oko lokacija ──
     # Konverzija u UTM za tačan buffer u metrima, pa nazad u WGS84 za folium

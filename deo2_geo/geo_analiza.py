@@ -165,8 +165,9 @@ def kreiraj_mapu(df_lokacije, df_kontejneri, deponije_data, gdf_places, gdf_land
     """
     print("\nKreiranje mape...")
 
-    # Centar mape nad Vojvodinom, zoom 8 za pregled cele oblasti
-    mapa = folium.Map(location=[45.25, 20.0], zoom_start=8)
+    # fit_bounds automatski podešava zoom da prikaže celu Vojvodinu
+    mapa = folium.Map()
+    mapa.fit_bounds([[44.6, 18.8], [46.2, 21.7]])
 
     # ── Raster podloga: satelitski snimak (Esri World Imagery WMS tile) ──
     folium.TileLayer(
@@ -283,8 +284,9 @@ def kreiraj_mapu(df_lokacije, df_kontejneri, deponije_data, gdf_places, gdf_land
     # Kontrola slojeva — dugme za uključivanje/isključivanje slojeva
     folium.LayerControl(collapsed=False).add_to(mapa)
 
-    mapa.save('mapa_novi_sad.html')
-    print("Mapa sacuvana kao 'mapa_novi_sad.html'")
+    out_path = os.path.join(os.path.dirname(__file__), 'mapa_vojvodina.html')
+    mapa.save(out_path)
+    print(f"Mapa sacuvana kao '{out_path}'")
 
 
 if __name__ == "__main__":
