@@ -1,34 +1,47 @@
 """
-ml_detekcija.py — Detekcija divljih deponija pomoću Random Forest algoritma
-Pipeline:
-1. Generisanje trening podataka iz OSM landuse poligona (ili sintetički fallback)
-2. Treniranje RandomForestClassifier na 4 spektralne feture (NDVI, Osvetljenost, Tekstura, NIR)
-3. Primena modela za detekciju potencijalnih deponija oko poznatih lokacija
-4. Upis detektovanih deponija u PostGIS bazu
-5. Prostorne analize rezultata i vizuelizacija na folium mapi
+ml_detekcija.py — ML detekcija divljih deponija iz satelitskog snimka
+Pipeline koji prati stvarni workflow daljinskog istraživanja:
+1. Kreiranje višekanalnog GeoTIFF rasterskog snimka (simulacija Sentinel-2)
+2. Ekstrakcija spektralnih obeležja po pikselima (B2, B3, B4, B8, NDVI, tekstura)
+3. Kreiranje trening labela iz poznatih lokacija deponija
+4. Treniranje Random Forest klasifikatora na pikselima snimka
+5. Klasifikacija celog snimka piksel po piksel
+6. Konverzija klasifikovanih piksela u vektorske poligone (rasterio.features.shapes)
+7. Upis geometrija detektovanih deponija u PostGIS bazu
+8. Prostorne analize i prikaz na folium mapi
 """
 
 import os
+import random
+import numpy as np
 import pandas as pd
 import psycopg2
-import numpy as np
 import folium
 import geopandas as gpd
-from datetime import datetime
-from shapely.geometry import Point
+import rasterio
+from rasterio.transform import from_bounds
+from rasterio.features import shapes
+from rasterio.crs import CRS
+from scipy.ndimage import uniform_filter
+from shapely.geometry import shape, Point
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
-from sklearn.preprocessing import LabelEncoder
+from dotenv import load_dotenv
 
-# Putanja do sačuvanog modela (za buduće pokretanje bez ponovnog treniranja)
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'model', 'model_deponije.pkl')
+load_dotenv()
+DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL")
 
-# URL konekcije se učitava iz env varijable, uz fallback na hardkodirani string
-DB_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
-)
+SHP_DIR     = os.path.join(os.path.dirname(__file__), '..', 'serbia_shp')
+RASTER_PATH = os.path.join(os.path.dirname(__file__), 'vojvodina_snimak.tif')
+
+# Vojvodina bounding box (WGS84)
+VOJV_MINX, VOJV_MINY = 18.8, 44.6
+VOJV_MAXX, VOJV_MAXY = 21.7, 46.2
+
+# Dimenzije rasterskog snimka — 300×200 piksela je dovoljno za demonstraciju
+RASTER_W, RASTER_H = 300, 200
+
 
 def get_connection():
     """Otvara konekciju na PostgreSQL/PostGIS bazu."""
@@ -36,451 +49,362 @@ def get_connection():
 
 
 # ─────────────────────────────────────────────
-# 1a. Trening podaci iz stvarnih OSM landuse poligona
+# 1. Kreiranje satelitskog snimka (GeoTIFF)
 # ─────────────────────────────────────────────
 
-# Putanja do SHP fajlova (relativan od lokacije ovog skripte)
-SHP_DIR = os.path.join(os.path.dirname(__file__), '..', 'serbia_shp')
-
-def generiraj_trening_podatke_iz_shp(n_pixela: int = 2000):
+def kreiraj_snimak():
     """
-    Generiše trening podatke bazirane na stvarnim OSM landuse poligonima.
-    Svaki fclass tip (forest, industrial, water...) mapira se na fizički
-    realne spektralne vrednosti (NDVI, Osvetljenost, Tekstura, NIR).
+    Kreira sintetički 4-kanalni GeoTIFF koji simulira Sentinel-2 satelitski snimak.
+    Kanali: B2 (plavi), B3 (zeleni), B4 (crveni), B8 (NIR — blisko infracrveno)
 
-    Spektralni potpisi su bazirani na poznatim karakteristikama:
-    - vegetacija: visok NDVI (fotosinteza), visok NIR (refleksija lista)
-    - voda:       nizak NDVI, nizak NIR (upijanje svetlosti)
-    - izgradjeno: srednji NDVI, visoka tekstura (heterogena površina)
-    - deponija:   nizak NDVI, visoka osvetljenost i tekstura (mešoviti materijal)
-
-    Vraća X (feture) i y (labele klasa).
-    Ako SHP fajl nije dostupan, poziva fallback sintetičku generaciju.
-    """
-    landuse_path = os.path.join(SHP_DIR, 'gis_osm_landuse_a_free_1.shp')
-    if not os.path.exists(landuse_path):
-        print("SHP fajl nije pronađen — koristim sintetičke podatke.")
-        return generiraj_trening_podatke(n_pixela)
-
-    # Učitaj landuse SHP i filtriraj na oblast Vojvodine
-    gdf = gpd.read_file(landuse_path)
-    gdf = gdf.cx[19.6:20.1, 45.1:45.5].copy()
-
-    # Mapiranje OSM fclass kategorija na spektralne klase
-    klasa_mapa = {
-        'forest': 'vegetacija', 'park': 'vegetacija', 'meadow': 'vegetacija',
-        'farmland': 'vegetacija', 'allotments': 'vegetacija', 'grass': 'vegetacija',
-        'scrub': 'vegetacija', 'nature_reserve': 'vegetacija',
-        'residential': 'izgradjeno', 'commercial': 'izgradjeno',
-        'industrial': 'izgradjeno', 'retail': 'izgradjeno',
-        'water': 'voda', 'reservoir': 'voda', 'basin': 'voda',
-    }
-
-    # Spektralni potpisi po klasi: (srednja vrednost, standardna devijacija)
-    spektralni_potpisi = {
-        'vegetacija': {'ndvi': (0.65, 0.08), 'brightness': (0.30, 0.06), 'texture': (0.20, 0.06), 'nir': (0.70, 0.08)},
-        'voda':       {'ndvi': (0.02, 0.04), 'brightness': (0.22, 0.05), 'texture': (0.08, 0.03), 'nir': (0.12, 0.05)},
-        'izgradjeno': {'ndvi': (0.12, 0.07), 'brightness': (0.68, 0.10), 'texture': (0.75, 0.10), 'nir': (0.42, 0.09)},
-        'deponija':   {'ndvi': (0.10, 0.09), 'brightness': (0.78, 0.12), 'texture': (0.88, 0.10), 'nir': (0.33, 0.10)},
-    }
-
-    np.random.seed(42)
-    X_list, y_list = [], []
-
-    for klasa, potpis in spektralni_potpisi.items():
-        if klasa == 'deponija':
-            # Deponije su retke — manji udeo u trening setu
-            n = n_pixela // 6
-        else:
-            # Broj uzoraka proporcionalan broju OSM poligona te klase
-            fclasses = [k for k, v in klasa_mapa.items() if v == klasa]
-            n_poligona = len(gdf[gdf['fclass'].isin(fclasses)])
-            n = max(50, min(n_poligona * 8, n_pixela // 3))
-
-        p = potpis
-        # Generiši normalno distribuirane feture (clip na [0,1] opseg)
-        features = np.column_stack([
-            np.clip(np.random.normal(p['ndvi'][0],       p['ndvi'][1],       n), 0, 1),
-            np.clip(np.random.normal(p['brightness'][0], p['brightness'][1], n), 0, 1),
-            np.clip(np.random.normal(p['texture'][0],    p['texture'][1],    n), 0, 1),
-            np.clip(np.random.normal(p['nir'][0],        p['nir'][1],        n), 0, 1),
-        ])
-        X_list.append(features)
-        y_list.extend([klasa] * n)
-
-    X = np.vstack(X_list)
-    y = np.array(y_list)
-    # Izmešaj uzorke da se izbegne redosled po klasama tokom treniranja
-    idx = np.random.permutation(len(y))
-    print(f"Trening podaci iz {len(gdf)} OSM landuse poligona: {len(X)} uzoraka, klase: {np.unique(y).tolist()}")
-    return X[idx], y[idx]
-
-
-# ─────────────────────────────────────────────
-# 1b. Rezervna sintetička generacija (fallback)
-# ─────────────────────────────────────────────
-
-def generiraj_trening_podatke(n_pixela: int = 2000):
-    """
-    Sintetički trening podaci bazirani na poznatim spektralnim potpisima klasa.
-    Koristi se kada SHP fajlovi nisu dostupni.
-    Simulira multispektralne satelitske kanale: [NDVI, Osvetljenost, Tekstura, NIR]
+    Spektralni potpisi po tipu površine:
+    - Vegetacija (polja, šume): visok NIR, nizak crveni → visok NDVI (fotosinteza)
+    - Urbano (gradovi): uniformne srednje vrednosti svih kanala
+    - Deponije: nizak NIR, visok crveni, visoka tekstura → negativan/nizak NDVI
     """
     np.random.seed(42)
+    h, w = RASTER_H, RASTER_W
 
-    klase = {
-        'vegetacija':  {'ndvi': (0.65, 0.08), 'brightness': (0.30, 0.06), 'texture': (0.20, 0.06), 'nir': (0.70, 0.08)},
-        'voda':        {'ndvi': (0.02, 0.04), 'brightness': (0.22, 0.05), 'texture': (0.08, 0.03), 'nir': (0.12, 0.05)},
-        'izgradjeno':  {'ndvi': (0.12, 0.07), 'brightness': (0.68, 0.10), 'texture': (0.75, 0.10), 'nir': (0.42, 0.09)},
-        'deponija':    {'ndvi': (0.10, 0.09), 'brightness': (0.78, 0.12), 'texture': (0.88, 0.10), 'nir': (0.33, 0.10)},
-    }
-    # Udeo svake klase u trening skupu (vegetacija dominira kao u stvarnom svetu)
-    distribucija = {'vegetacija': 0.40, 'voda': 0.15, 'izgradjeno': 0.30, 'deponija': 0.15}
+    # Osnova: vegetacija — dominantan tip terena u ravnoj Vojvodini
+    b2 = np.random.normal(0.08, 0.02, (h, w)).clip(0.01, 1.0)
+    b3 = np.random.normal(0.11, 0.02, (h, w)).clip(0.01, 1.0)
+    b4 = np.random.normal(0.07, 0.02, (h, w)).clip(0.01, 1.0)
+    b8 = np.random.normal(0.45, 0.06, (h, w)).clip(0.01, 1.0)  # visok NIR
 
-    X_list, y_list = [], []
-    for klasa, udeo in distribucija.items():
-        n = int(n_pixela * udeo)
-        p = klase[klasa]
-        features = np.column_stack([
-            np.clip(np.random.normal(p['ndvi'][0],       p['ndvi'][1],       n), 0, 1),
-            np.clip(np.random.normal(p['brightness'][0], p['brightness'][1], n), 0, 1),
-            np.clip(np.random.normal(p['texture'][0],    p['texture'][1],    n), 0, 1),
-            np.clip(np.random.normal(p['nir'][0],        p['nir'][1],        n), 0, 1),
-        ])
-        X_list.append(features)
-        y_list.extend([klasa] * n)
+    # Urbane zone — 10 kružnih zona koje simuliraju gradove
+    for _ in range(10):
+        cx = np.random.randint(15, w - 15)
+        cy = np.random.randint(15, h - 15)
+        r  = np.random.randint(6, 18)
+        yi, xi = np.ogrid[:h, :w]
+        m = (xi - cx)**2 + (yi - cy)**2 < r**2
+        b2[m] = np.random.normal(0.17, 0.02)
+        b3[m] = np.random.normal(0.17, 0.02)
+        b4[m] = np.random.normal(0.15, 0.02)
+        b8[m] = np.random.normal(0.22, 0.03)  # nizak NIR za urbano
 
-    X = np.vstack(X_list)
-    y = np.array(y_list)
-    idx = np.random.permutation(len(y))
-    return X[idx], y[idx]
+    # Deponije — 15 malih zona sa karakterističnim spektralnim potpisom
+    landfill_masks = []
+    for _ in range(15):
+        cx = np.random.randint(8, w - 8)
+        cy = np.random.randint(8, h - 8)
+        r  = np.random.randint(3, 7)
+        yi, xi = np.ogrid[:h, :w]
+        m = (xi - cx)**2 + (yi - cy)**2 < r**2
+        b2[m] = np.random.normal(0.14, 0.03)
+        b3[m] = np.random.normal(0.12, 0.03)
+        b4[m] = np.random.normal(0.22, 0.04)   # visok crveni
+        b8[m] = np.random.normal(0.11, 0.03)   # nizak NIR
+        # Tekstura — nasumični šum simulira heterogenost deponije
+        b4[m] += np.random.normal(0, 0.04, m.sum())
+        landfill_masks.append(m)
+
+    b2, b3, b4, b8 = [np.clip(x, 0.01, 1.0) for x in [b2, b3, b4, b8]]
+
+    # GeoTransform — preslikava piksel koordinate na geografske (WGS84)
+    transform = from_bounds(VOJV_MINX, VOJV_MINY, VOJV_MAXX, VOJV_MAXY, width=w, height=h)
+
+    with rasterio.open(
+        RASTER_PATH, 'w',
+        driver='GTiff', height=h, width=w,
+        count=4, dtype=np.float32,
+        crs=CRS.from_epsg(4326), transform=transform
+    ) as dst:
+        dst.write(b2.astype(np.float32), 1)  # B2 — plavi
+        dst.write(b3.astype(np.float32), 2)  # B3 — zeleni
+        dst.write(b4.astype(np.float32), 3)  # B4 — crveni
+        dst.write(b8.astype(np.float32), 4)  # B8 — NIR
+
+    print(f"Snimak kreiran: {RASTER_PATH} ({w}×{h} piksela, 4 kanala)")
+    return landfill_masks
 
 
 # ─────────────────────────────────────────────
-# 2. Treniranje Random Forest modela
+# 2. Ekstrakcija spektralnih obeležja
 # ─────────────────────────────────────────────
 
-def treniraj_model(X, y):
+def ekstrahuj_karakteristike():
     """
-    Trenira RandomForestClassifier i ispisuje evaluaciju.
-    80/20 split: 80% trening, 20% test.
-    stratify=y osigurava isti udeo klasa u oba skupa.
-    n_jobs=-1 koristi sve dostupne CPU jezgre za paralelno treniranje.
+    Čita GeoTIFF i izračunava 7 spektralnih obeležja po svakom pikselu:
+    B2, B3, B4, B8 — sirove vrednosti kanala
+    NDVI = (B8 - B4) / (B8 + B4) — vegetacijski indeks
+    Tekstura — lokalna standardna devijacija B4 (deponije su heterogene)
+    Osvetljenost — prosek vidljivih kanala
+
+    Vraća matricu [n_piksela × 7] i metapodatke rasterа.
     """
+    with rasterio.open(RASTER_PATH) as src:
+        b2 = src.read(1).astype(np.float32)
+        b3 = src.read(2).astype(np.float32)
+        b4 = src.read(3).astype(np.float32)
+        b8 = src.read(4).astype(np.float32)
+        transform = src.transform
+        crs       = src.crs
+        h, w      = b2.shape
+
+    # NDVI: vegetacija > 0.3, urbano 0.1–0.3, deponije < 0.1
+    ndvi = np.where((b8 + b4) > 0, (b8 - b4) / (b8 + b4), 0.0)
+
+    # Tekstura — lokalna standardna devijacija B4 kanala (3×3 prozor)
+    mean_b4  = uniform_filter(b4, size=3)
+    mean_sq  = uniform_filter(b4 ** 2, size=3)
+    tekstura = np.sqrt(np.maximum(mean_sq - mean_b4 ** 2, 0))
+
+    brightness = (b2 + b3 + b4) / 3.0
+
+    features = np.stack([
+        b2.ravel(), b3.ravel(), b4.ravel(), b8.ravel(),
+        ndvi.ravel(), tekstura.ravel(), brightness.ravel()
+    ], axis=1)
+
+    print(f"Ekstahovano: {features.shape[0]} piksela × {features.shape[1]} obeležja")
+    return features, ndvi, transform, crs, h, w
+
+
+# ─────────────────────────────────────────────
+# 3. Trening labele
+# ─────────────────────────────────────────────
+
+def kreiraj_labele(landfill_masks, h, w):
+    """
+    Kreira binarnu matricu labela iz pozicija sintetičkih deponija u snimku.
+    1 = piksel pripada deponiji, 0 = sve ostalo.
+    U stvarnom projektu, labele bi se dobijale rasterizacijom
+    ručno anotiranih poligona (npr. iz QGIS-a) ili OSM landfill sloja.
+    """
+    labels = np.zeros(h * w, dtype=np.int32)
+    for mask in landfill_masks:
+        labels[mask.ravel()] = 1
+    n_dep = labels.sum()
+    print(f"Labele: {n_dep} deponija / {len(labels) - n_dep} ostalo ({n_dep/(h*w)*100:.1f}%)")
+    return labels
+
+
+# ─────────────────────────────────────────────
+# 4. Treniranje Random Forest
+# ─────────────────────────────────────────────
+
+def treniraj_model(features, labels):
+    """
+    Trenira Random Forest na uzorku piksela rasterskog snimka.
+    Uzorkovanje 8000 piksela umesto svih jer je ceo snimak prevelik za memoriju.
+    stratify=y osigurava isti udeo deponija u trening i test skupu.
+    """
+    n = min(8000, len(labels))
+    idx = np.random.choice(len(labels), n, replace=False)
+    X_s, y_s = features[idx], labels[idx]
+
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.20, random_state=42, stratify=y
+        X_s, y_s, test_size=0.2, random_state=42, stratify=y_s
     )
 
-    # 150 stabala, max dubina 12 — balans između preciznosti i brzine
     clf = RandomForestClassifier(n_estimators=150, max_depth=12, random_state=42, n_jobs=-1)
     clf.fit(X_train, y_train)
 
     y_pred = clf.predict(X_test)
-    tacnost = accuracy_score(y_test, y_pred)
+    print(f"\nTačnost: {accuracy_score(y_test, y_pred):.1%}")
+    print(classification_report(y_test, y_pred, target_names=['Nije deponija', 'Deponija']))
 
-    print("\n" + "=" * 60)
-    print("EVALUACIJA MODELA — Random Forest")
-    print("=" * 60)
-    print(f"Ukupna tacnost: {tacnost:.1%}")
-    print("\nKlasifikacioni izveštaj:")
-    print(classification_report(y_test, y_pred))
-
-    # Važnost atributa — koliko svaka fetura doprinosi klasifikaciji
-    feature_names = ['NDVI', 'Osvetljenost', 'Tekstura', 'NIR']
-    importances = clf.feature_importances_
-    print("Važnost atributa (feature importance):")
-    for name, imp in sorted(zip(feature_names, importances), key=lambda x: -x[1]):
+    feature_names = ['B2', 'B3', 'B4', 'B8', 'NDVI', 'Tekstura', 'Osvetljenost']
+    print("Važnost obeležja (feature importance):")
+    for name, imp in sorted(zip(feature_names, clf.feature_importances_), key=lambda x: -x[1]):
         print(f"  {name}: {imp:.3f}")
 
     return clf
 
 
 # ─────────────────────────────────────────────
-# 3. Primena modela — detekcija deponija
+# 5. Klasifikacija i vektorizacija
 # ─────────────────────────────────────────────
 
-def detektuj_deponije(clf, lokacije_df, n_uzoraka_po_lokaciji: int = 80):
+def klasifikuj_i_vektorizuj(clf, features, transform, h, w):
     """
-    Primenjuje trenirani model na spektralne uzorke generisane oko svake lokacije.
-    Za svaku lokaciju generiše n_uzoraka_po_lokaciji nasumičnih spektralnih vektora,
-    klasifikuje ih i uzima do 3 piksela klasifikovanih kao 'deponija' sa confidence > 0.55.
+    Klasifikuje sve piksele snimka i konvertuje susedne piksele klase 'deponija'
+    u vektorske poligone koristeći rasterio.features.shapes().
 
-    confidence = verovatnoća klase 'deponija' prema predict_proba().
-    Prag 0.55 filtrira nesigurne detekcije.
+    Ovo je standardni raster→vektor korak u GIS obradi satelitskih snimaka:
+    - Svaki blok susednih piksela iste klase postaje jedan poligon
+    - shapes() koristi GeoTransform za ispravne geografske koordinate poligona
     """
-    np.random.seed(123)
-    # Indeks klase 'deponija' u nizu klasa modela
-    deponija_klasa_idx = list(clf.classes_).index('deponija')
-    deponije_ml = []
+    predictions = clf.predict(features).reshape(h, w).astype(np.uint8)
+    n_dep = predictions.sum()
+    print(f"Klasifikovano {n_dep} piksela kao deponija ({n_dep/(h*w)*100:.1f}% snimka)")
 
-    for _, lokacija in lokacije_df.iterrows():
-        # Uniformno distribuirani spektralni pikseli — simulacija skeniranja okoline
-        X_nova = np.column_stack([
-            np.random.uniform(0.0, 1.0, n_uzoraka_po_lokaciji),
-            np.random.uniform(0.0, 1.0, n_uzoraka_po_lokaciji),
-            np.random.uniform(0.0, 1.0, n_uzoraka_po_lokaciji),
-            np.random.uniform(0.0, 1.0, n_uzoraka_po_lokaciji),
-        ])
+    geometries = []
+    # shapes() vraća (GeoJSON rečnik, vrednost piksela) parove
+    for geom_dict, value in shapes(predictions, connectivity=4, transform=transform):
+        if value == 1:
+            geom = shape(geom_dict)
+            # Filtriraj premale poligone (šum) — min ~1 ha
+            if geom.area > 0.0001:
+                geometries.append(geom)
 
-        y_pred  = clf.predict(X_nova)
-        y_proba = clf.predict_proba(X_nova)
-
-        # Pronađi piksele klasifikovane kao deponija
-        deponija_pikseli = np.where(y_pred == 'deponija')[0]
-
-        # Uzmi max 3 detekcije po lokaciji da se izbegne prenatrpavanje
-        for i, px in enumerate(deponija_pikseli[:3]):
-            confidence = y_proba[px, deponija_klasa_idx]
-            if confidence < 0.55:
-                continue  # Preskoči detekcije ispod praga pouzdanosti
-
-            # Nasumični pomak koordinata od centra lokacije (max ±1.5km aprox)
-            offset_lat = np.random.uniform(-0.015, 0.015)
-            offset_lon = np.random.uniform(-0.015, 0.015)
-
-            deponije_ml.append({
-                'naziv':           f"ML Deponija {lokacija['naziv'][:5]}-{i+1}",
-                'lat':             lokacija['lat'] + offset_lat,
-                'lon':             lokacija['lon'] + offset_lon,
-                'povrsina_m2':     round(np.random.uniform(60, 900), 1),
-                'tip_otpada':      np.random.choice(['komunalni', 'gradjevinski', 'mesoviti', 'industrijski']),
-                'status':          'detektovana',
-                'confidence':      round(float(confidence), 3),
-                'datum_detekcije': datetime.now().strftime('%Y-%m-%d'),
-                # Sačuvaj spektralne feture za dokumentaciju detekcije
-                'ndvi':            round(float(X_nova[px, 0]), 3),
-                'brightness':      round(float(X_nova[px, 1]), 3),
-                'texture':         round(float(X_nova[px, 2]), 3),
-                'nir':             round(float(X_nova[px, 3]), 3),
-            })
-
-    df = pd.DataFrame(deponije_ml)
-    if df.empty:
-        print("Model nije detektovao nijednu deponiju sa confidence > 0.55")
-    return df
+    print(f"Vektorizovano {len(geometries)} poligona deponija")
+    return geometries, predictions
 
 
 # ─────────────────────────────────────────────
-# 4. Upisivanje u PostGIS bazu
+# 6. Upis u PostGIS
 # ─────────────────────────────────────────────
 
-def upisi_deponije_u_bazu(deponije_df):
+def upisi_u_bazu(geometries):
     """
-    Upisuje ML detektovane deponije u PostGIS tabelu deponije.
-    Za svaku deponiju:
-    1. Pronalazi najbližu lokaciju u bazi (ST_Distance + ORDER BY LIMIT 1)
-    2. Kreira buffer poligon oko koordinate detekcije kao geometriju
-    Svaki INSERT se commit-uje odvojeno — greška jednog ne blokira ostale.
+    Upisuje vektorske poligone ML detektovanih deponija u PostGIS tabelu deponije.
+    Geometrija se upisuje direktno iz Shapely WKT — nema buffer aproksimacije,
+    već stvarni oblik detektovanog poligona iz raster→vektor konverzije.
     """
-    if deponije_df.empty:
+    if not geometries:
+        print("Nema geometrija za upis.")
         return
-    print(f"\nUpisujem {len(deponije_df)} ML deponija u bazu...")
+
     conn = get_connection()
     cursor = conn.cursor()
 
-    for _, depo in deponije_df.iterrows():
-        try:
-            # Pronađi najbližu lokaciju iz baze merenjem geodetske distance
-            cursor.execute("""
-                SELECT id FROM lokacije
-                ORDER BY ST_Distance(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
-                LIMIT 1
-            """, (depo['lon'], depo['lat']))
-            lokacija_id = cursor.fetchone()[0]
+    cursor.execute("SELECT id FROM lokacije LIMIT 1")
+    row = cursor.fetchone()
+    if not row:
+        print("Nema lokacija u bazi!")
+        cursor.close()
+        conn.close()
+        return
+    lok_id = row[0]
 
-            # Upiši deponiju sa ST_Buffer kao geometrijom (krug oko detekcije)
-            cursor.execute("""
-                INSERT INTO deponije
-                    (naziv, povrsina_m2, tip_otpada, status, datum_otkrivanja, lokacija_id, geom)
-                VALUES (%s, %s, %s, %s, %s, %s,
-                    ST_Buffer(
-                        ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
-                        %s
-                    )::geometry)
-            """, (
-                depo['naziv'], depo['povrsina_m2'], depo['tip_otpada'],
-                depo['status'], depo['datum_detekcije'], lokacija_id,
-                depo['lon'], depo['lat'],
-                # Radijus proporcionalan površini deponije
-                int(depo['povrsina_m2'] ** 0.5 / 2)
-            ))
-            conn.commit()
-        except Exception as e:
-            print(f"Greška pri upisu {depo['naziv']}: {e}")
-            conn.rollback()
+    tipovi = ['komunalni', 'gradjevinski', 'mesoviti', 'industrijski']
+    count  = 0
 
+    for i, geom in enumerate(geometries[:20]):
+        wkt  = geom.wkt
+        area = geom.area * (111320 ** 2)  # stepeni² → m² (aproksimacija)
+        cursor.execute("""
+            INSERT INTO deponije (naziv, povrsina_m2, tip_otpada, status,
+                datum_otkrivanja, lokacija_id, geom)
+            VALUES (%s, %s, %s, %s, NOW(), %s, ST_GeomFromText(%s, 4326))
+        """, (f"ML Deponija {i+1}", round(area, 1),
+              random.choice(tipovi), 'detektovana', lok_id, wkt))
+        count += 1
+
+    conn.commit()
     cursor.close()
     conn.close()
-    print("Deponije upisane!")
+    print(f"Upisano {count} ML deponija u PostGIS bazu.")
 
 
 # ─────────────────────────────────────────────
-# 5. Prostorne analize sa ML rezultatima
+# 7. Prostorne analize
 # ─────────────────────────────────────────────
 
-def prostorne_analize(deponije_df, lokacije_df):
+def prostorne_analize(geometries):
     """
-    Izvodi 5 prostornih analiza nad ML detektovanim deponijama:
-    1. Buffer 300m — zone uticaja svake deponije
-    2. Sjoin — koje lokacije su unutar buffer zona
-    3. Agregacija — ukupna površina i prosečni confidence
-    4. Distribucija — raspored po tipu otpada
-    5. Distanca — koliko je svaka deponija od najbliže lokacije
+    5 prostornih analiza nad ML detektovanim deponijama:
+    1. Ukupna površina svih detektovanih deponija
+    2. Union — spajanje poligona u jednu geometriju
+    3. Buffer 500m — zona uticaja oko deponija
+    4. Sjoin — koje lokacije iz baze su u blizini deponija
+    5. Distribucija veličina (min, max, prosek)
     """
-    if deponije_df.empty:
+    if not geometries:
         print("Nema ML deponija za analizu.")
         return
 
-    print("\n" + "=" * 60)
-    print("PROSTORNE ANALIZE SA ML REZULTATIMA")
-    print("=" * 60)
+    gdf_ml  = gpd.GeoDataFrame(
+        {'naziv': [f'ML Deponija {i+1}' for i in range(len(geometries))]},
+        geometry=geometries, crs='EPSG:4326'
+    )
+    gdf_utm = gdf_ml.to_crs('EPSG:32634')
 
-    # Kreiraj GeoDataFrame od ML deponija
-    geometry = [Point(row['lon'], row['lat']) for _, row in deponije_df.iterrows()]
-    gdf_ml = gpd.GeoDataFrame(deponije_df.copy(), geometry=geometry, crs='EPSG:4326')
+    print("\n=== PROSTORNE ANALIZE ML REZULTATA ===")
+    print(f"1. Detektovano deponija: {len(gdf_ml)}")
+    print(f"   Ukupna površina: {gdf_utm.geometry.area.sum():.0f} m²")
 
-    # Kreiraj GeoDataFrame od lokacija iz baze
-    geom_lok = [Point(row['lon'], row['lat']) for _, row in lokacije_df.iterrows()]
-    gdf_lok  = gpd.GeoDataFrame(lokacije_df.copy(), geometry=geom_lok, crs='EPSG:4326')
+    union_area = gdf_utm.geometry.union_all().area
+    print(f"2. Union svih poligona: {union_area:.0f} m²")
 
-    # Projekcija u UTM za precizne distance i buffer u metrima
-    gdf_ml_utm  = gdf_ml.to_crs('EPSG:32634')
-    gdf_lok_utm = gdf_lok.to_crs('EPSG:32634')
+    buf = gdf_utm.copy()
+    buf['geometry'] = gdf_utm.geometry.buffer(500)
+    print(f"3. Buffer 500m — zona uticaja: {buf.geometry.union_all().area:.0f} m²")
 
-    # Analiza 1: Buffer 300m — zone uticaja ML deponija
-    buffer_zone = gdf_ml_utm.copy()
-    buffer_zone['geometry'] = gdf_ml_utm.geometry.buffer(300)
-    buffer_zone = buffer_zone.to_crs('EPSG:4326')
-    print(f"\n1. Buffer zone (300m): {len(buffer_zone)} zona kreirano")
+    conn = get_connection()
+    lok_df = pd.read_sql(
+        "SELECT id, naziv, ST_X(geom) as lon, ST_Y(geom) as lat FROM lokacije", conn
+    )
+    conn.close()
 
-    # Analiza 2: Koje lokacije iz baze se nalaze unutar buffer zona
-    overlap = gpd.sjoin(gdf_lok, buffer_zone[['geometry']], how='inner', predicate='intersects')
-    print(f"2. Lokacije unutar 300m buffer zona: {len(overlap)}")
-    if not overlap.empty:
-        print("   Lokacije:", overlap['naziv'].tolist())
+    geom_lok = [Point(r['lon'], r['lat']) for _, r in lok_df.iterrows()]
+    gdf_lok  = gpd.GeoDataFrame(lok_df, geometry=geom_lok, crs='EPSG:4326').to_crs('EPSG:32634')
 
-    # Analiza 3: Statistike detektovanih deponija
-    print(f"\n3. Ukupna detektovana površina: {deponije_df['povrsina_m2'].sum():.1f} m²")
-    print(f"   Prosečna površina: {deponije_df['povrsina_m2'].mean():.1f} m²")
-    print(f"   Prosečni confidence: {deponije_df['confidence'].mean():.3f}")
+    overlap = gpd.sjoin(gdf_lok, buf[['geometry']], how='inner', predicate='intersects')
+    print(f"4. Lokacije unutar 500m od ML deponija: {len(overlap)}")
 
-    # Analiza 4: Koliko deponija po tipu otpada
-    print("\n4. Distribucija po tipu otpada:")
-    print(deponije_df['tip_otpada'].value_counts().to_string())
-
-    # Analiza 5: Distanca svake ML deponije do najbliže lokacije u bazi
-    print("\n5. Distanca do najbliže lokacije (UTM, metri):")
-    for _, ml_row in gdf_ml_utm.iterrows():
-        distances = gdf_lok_utm.geometry.distance(ml_row.geometry)
-        min_dist  = distances.min()
-        naj_lok   = lokacije_df.iloc[distances.idxmin()]['naziv']
-        print(f"   {ml_row['naziv']}: {min_dist:.0f} m od '{naj_lok}'")
+    areas = gdf_utm.geometry.area
+    print(f"5. Veličine — min: {areas.min():.0f} m², max: {areas.max():.0f} m², prosek: {areas.mean():.0f} m²")
 
 
 # ─────────────────────────────────────────────
-# 6. Kreiranje mape
+# 8. Mapa rezultata
 # ─────────────────────────────────────────────
 
-def kreiraj_mapu(originalne_deponije, ml_deponije_df):
+def kreiraj_mapu(geometries):
     """
-    Kreira folium mapu sa dva sloja:
-    - Originalne deponije (narandžasti markeri)
-    - ML detektovane deponije (crveni markeri sa confidence score-om)
-    Esri satelitska podloga za kontekst.
+    Kreira folium mapu sa slojem ML detektovanih deponija prikazanih kao
+    stvarni vektorski poligoni (ne aproksimativni kružni markeri).
+    Esri satelitska podloga za vizuelni kontekst.
     """
-    mapa = folium.Map(location=[45.25, 20.0], zoom_start=8)
+    mapa = folium.Map()
+    mapa.fit_bounds([[VOJV_MINY, VOJV_MINX], [VOJV_MAXY, VOJV_MAXX]])
 
-    # Satelitska raster podloga
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        attr='Esri World Imagery',
-        name='Satelitska podloga',
-        overlay=False,
-        control=True
+        attr='Esri World Imagery', name='Satelitska podloga',
+        overlay=False, control=True
     ).add_to(mapa)
 
-    # Sloj originalnih deponija iz baze
-    fg_orig = folium.FeatureGroup(name='Originalne deponije', show=True)
-    for _, row in originalne_deponije.iterrows():
-        folium.Marker(
-            location=[row['lat'], row['lon']],
-            popup=(f"<b>{row['naziv']}</b><br>"
-                   f"Površina: {row['povrsina_m2']:.0f} m²<br>"
-                   f"Tip: {row['tip_otpada']}<br>"
-                   f"Status: {row['status']}"),
-            icon=folium.Icon(color='orange', icon='trash'),
-            tooltip=row['naziv']
-        ).add_to(fg_orig)
-    fg_orig.add_to(mapa)
-
-    # Sloj ML detektovanih deponija (crveni kružići sa confidence-om)
-    fg_ml = folium.FeatureGroup(name='ML Detektovane deponije', show=True)
-    for _, row in ml_deponije_df.iterrows():
-        folium.CircleMarker(
-            location=[row['lat'], row['lon']],
-            radius=8,
-            popup=(f"<b>{row['naziv']}</b><br>"
-                   f"Confidence: {row['confidence']:.1%}<br>"
-                   f"Površina: {row['povrsina_m2']:.0f} m²<br>"
-                   f"NDVI: {row['ndvi']:.3f} | Tekstura: {row['texture']:.3f}"),
-            color='red', fill=True, fillColor='red', fillOpacity=0.7,
-            tooltip=f"{row['naziv']} ({row['confidence']:.0%})"
-        ).add_to(fg_ml)
-    fg_ml.add_to(mapa)
+    fg = folium.FeatureGroup(name='ML Detektovane deponije', show=True)
+    for i, geom in enumerate(geometries):
+        if geom.geom_type == 'Polygon':
+            coords = [[y, x] for x, y in geom.exterior.coords]
+            area   = geom.area * (111320 ** 2)
+            folium.Polygon(
+                locations=coords,
+                popup=f"<b>ML Deponija {i+1}</b><br>Površina: {area:.0f} m²",
+                color='red', fill=True, fillColor='red', fillOpacity=0.5, weight=2
+            ).add_to(fg)
+    fg.add_to(mapa)
 
     folium.LayerControl().add_to(mapa)
-    mapa.save('mapa_ml_rezultati.html')
-    print("Mapa sacuvana kao 'mapa_ml_rezultati.html'")
+    out = os.path.join(os.path.dirname(__file__), 'mapa_ml_rezultati.html')
+    mapa.save(out)
+    print(f"Mapa sačuvana: {out}")
 
 
 # ─────────────────────────────────────────────
-# MAIN — pokretanje kompletnog ML pipeline-a
+# MAIN — kompletan ML pipeline
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Učitaj lokacije iz baze kao osnovu za detekciju
-    conn = get_connection()
-    lokacije_df = pd.read_sql("""
-        SELECT id, naziv, ST_X(geom) as lon, ST_Y(geom) as lat FROM lokacije
-    """, conn)
-    conn.close()
+    print("=== ML DETEKCIJA DIVLJIH DEPONIJA IZ SATELITSKOG SNIMKA ===\n")
 
-    print("LOKACIJE U SISTEMU:")
-    print(lokacije_df.to_string(index=False))
+    print("Korak 1: Kreiranje satelitskog snimka (GeoTIFF)...")
+    landfill_masks = kreiraj_snimak()
 
-    # Korak 1: Generiši trening podatke iz OSM landuse SHP (fallback: sintetički)
-    print("\nGenerisanje trening podataka iz OSM landuse poligona...")
-    X, y = generiraj_trening_podatke_iz_shp(n_pixela=2000)
-    print(f"Trening skup: {len(X)} uzoraka, klase: {np.unique(y).tolist()}")
+    print("\nKorak 2: Ekstrakcija spektralnih obeležja iz snimka...")
+    features, ndvi, transform, crs, h, w = ekstrahuj_karakteristike()
 
-    # Korak 2: Treniraj Random Forest model i prikaži evaluaciju
-    clf = treniraj_model(X, y)
+    print("\nKorak 3: Kreiranje trening labela...")
+    labels = kreiraj_labele(landfill_masks, h, w)
 
-    # Korak 3: Primeni model na okolinu svake lokacije
-    ml_deponije_df = detektuj_deponije(clf, lokacije_df, n_uzoraka_po_lokaciji=80)
-    print(f"\nDetektovano {len(ml_deponije_df)} ML deponija (confidence > 0.55)")
-    if not ml_deponije_df.empty:
-        print(ml_deponije_df[['naziv', 'povrsina_m2', 'tip_otpada', 'confidence']].to_string(index=False))
+    print("\nKorak 4: Treniranje Random Forest modela na pikselima...")
+    clf = treniraj_model(features, labels)
 
-    # Korak 4: Upiši detektovane deponije u PostGIS bazu
-    upisi_deponije_u_bazu(ml_deponije_df)
+    print("\nKorak 5: Klasifikacija snimka i vektorizacija...")
+    geometries, predictions = klasifikuj_i_vektorizuj(clf, features, transform, h, w)
 
-    # Korak 5: Izvedi prostorne analize nad rezultatima
-    prostorne_analize(ml_deponije_df, lokacije_df)
+    print("\nKorak 6: Upis u PostGIS bazu...")
+    upisi_u_bazu(geometries)
 
-    # Korak 6: Kreiraj mapu sa originalnim i ML deponijama
-    conn2 = get_connection()
-    sve = pd.read_sql("""
-        SELECT naziv, povrsina_m2, tip_otpada, status,
-               ST_X(ST_Centroid(geom)) as lon,
-               ST_Y(ST_Centroid(geom)) as lat
-        FROM deponije WHERE geom IS NOT NULL
-    """, conn2)
-    conn2.close()
+    print("\nKorak 7: Prostorne analize...")
+    prostorne_analize(geometries)
 
-    # Razdvoji originalne od ML deponija po nazivu
-    originalne = sve[~sve['naziv'].str.contains('ML', na=False)]
-    detektovane = ml_deponije_df if not ml_deponije_df.empty else sve[sve['naziv'].str.contains('ML', na=False)]
-    kreiraj_mapu(originalne, detektovane)
+    print("\nKorak 8: Kreiranje mape...")
+    kreiraj_mapu(geometries)
 
     print("\n=== DEO 3 ZAVRSEN! ===")

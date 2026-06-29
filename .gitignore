@@ -6,8 +6,10 @@ serbia.zip
 # HTML mape
 *.html
 
-# ML model
+# ML model i generisani rasterski snimci
 deo3_ml/model/
+*.tif
+*.tiff
 
 # Python cache
 __pycache__/
