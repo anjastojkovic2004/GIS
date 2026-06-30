@@ -4,7 +4,7 @@ Sistem evidentira lokacije, kontejnere, komunalna
 preduzeća, deponije i inspekcije za Vojvodinu, sa ML detekcijom divljih
 deponija iz simuliranog satelitskog snimka.
 
-Baza: PostgreSQL/PostGIS na Supabase. Podaci: stvarni OSM/Geofabrik podaci za
+Baza: PostgreSQL/PostGIS na Supabase. Podaci: OSM/Geofabrik podaci za
 Vojvodinu (gradovi, kontejneri, deponije).
 
 ---
@@ -29,7 +29,7 @@ U root folderu (`GIS/.env`) mora postojati:
 DB_URL=postgresql://...supabase.com:6543/postgres
 ```
 
-`.env` je u `.gitignore` — nikad se ne pushuje na GitHub.
+`.env` je u `.gitignore` 
 
 ### SHP podaci
 
@@ -75,7 +75,7 @@ da se skrati na `python`.
 
 | Fajl | Šta radi |
 |---|---|
-| `baza.py` | Kreira 5 tabela (lokacije, komunalna_preduzeca, kontejneri, deponije, inspekcije), učitava stvarne podatke iz `serbia_shp/` — 10 gradova Vojvodine, 42 kontejnera/reciklažna mesta, 30 stvarnih OSM deponija |
+| `baza.py` | Kreira 5 tabela (lokacije, komunalna_preduzeca, kontejneri, deponije, inspekcije), učitava stvarne podatke iz `serbia_shp/` — 10 gradova Vojvodine, 42 kontejnera/reciklažna mesta (svaki sa sopstvenom OSM koordinatom), 30 OSM deponija |
 | `crud.py` | Demonstrira Create/Read/Update/Delete za svih 5 tabela |
 | `upiti.py` | 10 SQL upita sa JOIN, WHERE, GROUP BY — ispisuje rezultate u terminal kao pandas DataFrame |
 
@@ -83,15 +83,15 @@ da se skrati na `python`.
 
 | Fajl | Šta radi | Izlaz |
 |---|---|---|
-| `geo_analiza.py` | Učitava SHP slojeve (mesta, korišćenje zemljišta), spaja ih sa bazom (spatial join), pravi mapu sa svim slojevima | `deo2_geo/mapa_vojvodina.html` |
-| `spatial_operacije.py` | 5 overlay operacija (buffer, intersection, union, clip, difference) + 5 prostornih upita (within, overlaps, contains, distance, disjoint) — ispis u terminal | — |
-| `mapa_spatial_operacije.py` | Vizuelizuje buffer zone (10km), clip zonu i distance na mapi | `deo2_geo/mapa_spatial_operacije.html` |
+| `geo_analiza.py` | Učitava SHP slojeve (mesta, korišćenje zemljišta), spaja ih sa bazom (spatial join), pravi mapu sa svim slojevima — kontejneri na svojoj pravoj koordinati, deponije kao poligon + marker na centroidu | `deo2_geo/mapa_vojvodina.html` |
+| `spatial_operacije.py` | 5 overlay operacija (buffer, intersection, union, clip, difference) + 5 prostornih upita (within, overlaps, contains, distance, disjoint) — ispis u terminal. Buffer/zona rizika (3km) se pravi oko **deponija**, clip koristi pravu administrativnu granicu Vojvodine | — |
+| `mapa_spatial_operacije.py` | Vizuelizuje deponije, zonu rizika (3km) oko njih, granicu Vojvodine i distance na mapi | `deo2_geo/mapa_spatial_operacije.html` |
 
 ### DEO 3 — `deo3_ml/`
 
 | Fajl | Šta radi | Izlaz |
 |---|---|---|
-| `ml_detekcija.py` | Generiše sintetički GeoTIFF (simulacija Sentinel-2) sa spektralnim potpisima postavljenim na stvarne koordinate gradova/deponija iz baze, trenira Random Forest, klasifikuje ceo snimak, vektorizuje rezultate i upisuje nove "ML Deponija" zapise u bazu (vezane za najbližu lokaciju) | `deo3_ml/mapa_ml_rezultati.html`, `deo3_ml/vojvodina_snimak.tif` |
+| `ml_detekcija.py` | Generiše sintetički GeoTIFF (simulacija Sentinel-2, ~100m/piksel) sa spektralnim potpisima postavljenim na stvarne koordinate gradova/deponija iz baze, trenira Random Forest, klasifikuje ceo snimak (prag pouzdanosti 0.9 + morfološko čišćenje da se izbegnu lažne detekcije u šumu), vektorizuje rezultate i upisuje nove "ML Deponija" zapise u bazu (vezane za geografski najbližu lokaciju). Mapa prikazuje poligon + marker na centroidu za svaku detekciju | `deo3_ml/mapa_ml_rezultati.html`, `deo3_ml/vojvodina_snimak.tif` |
 
 ### `app/app.py` — Streamlit aplikacija
 
@@ -107,22 +107,23 @@ leve strane ima 8 stranica:
 - **ML Detekcija** — tabela ML detektovanih deponija (naziv sadrži "ML"),
   mogućnost izmene tipa otpada i statusa, mapa detekcija
 - **Spatial Analiza** — distanca između dve lokacije, 5 overlay operacija
-  (buffer/intersection/union/clip/difference) sa rezultatima u tabelama,
-  mapa sa SHP slojevima i satelitskom podlogom + **color picker** za boje
-  lokacija i deponija po statusu (simbologija)
+  (buffer/intersection/union/clip/difference) sa rezultatima u tabelama —
+  buffer/zona rizika (3km) je oko **deponija**, clip koristi pravu granicu
+  Vojvodine; mapa sa SHP slojevima i satelitskom podlogom + **color picker**
+  za boje lokacija i deponija po statusu (simbologija)
 
 ---
 
 ## 4. Otvaranje generisanih mapa
 
 HTML mape se ne mogu otvoriti direktno kao `file://` jer OpenStreetMap
-blokira tile zahteve bez servera. Pokreni lokalni server iz `GIS/` foldera:
+blokira tile zahteve bez servera. Pokrenuti lokalni server iz `GIS/` foldera:
 
 ```bash
 python -m http.server 8000
 ```
 
-Pa otvori u browseru:
+Pa otvoriti u browseru:
 - `http://localhost:8000/deo2_geo/mapa_vojvodina.html`
 - `http://localhost:8000/deo2_geo/mapa_spatial_operacije.html`
 - `http://localhost:8000/deo3_ml/mapa_ml_rezultati.html`

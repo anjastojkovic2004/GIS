@@ -267,17 +267,24 @@ def klasifikuj_i_vektorizuj(clf, features, transform, h, w):
     - shapes() koristi GeoTransform za ispravne geografske koordinate poligona
 
     Closing spaja susedne fragmente jedne deponije u kompaktan poligon, a
-    uklanjanje povezanih komponenti od samo 1 piksela briše izolovan šum
-    bez gubljenja malih (ali stvarnih) deponija — binary_opening bi to uradio
-    jer zahteva pun 3×3 blok, što briše i legitimne male detekcije.
+    uklanjanje malih povezanih komponenti briše izolovan šum bez gubljenja
+    malih (ali stvarnih) deponija — binary_opening bi to uradio jer zahteva
+    pun 3×3 blok, što briše i legitimne male detekcije.
+
+    Klasa 'deponija' je veoma retka (~0.02% piksela), pa čak i mali procenat
+    pogrešno klasifikovanih piksela na celom snimku (4M piksela) stvara stotine
+    lažnih detekcija razbacanih po vegetaciji — standardni predict() koristi
+    prag 0.5 što je previše permisivno. Visok prag verovatnoće (0.9) drastično
+    smanjuje lažne pozitive, uz manji gubitak tačnih detekcija.
     """
-    predictions = clf.predict(features).reshape(h, w).astype(np.uint8)
+    proba = clf.predict_proba(features)[:, list(clf.classes_).index(1)]
+    predictions = (proba > 0.9).astype(np.uint8).reshape(h, w)
     predictions = binary_closing(predictions, structure=np.ones((3, 3))).astype(np.uint8)
 
     labeled, n_labels = label(predictions)
     if n_labels > 0:
         sizes = ndi_sum(predictions, labeled, range(1, n_labels + 1))
-        sum_labels = np.where(sizes < 2)[0] + 1   # ukloni komponente od 1 piksela (šum)
+        sum_labels = np.where(sizes < 3)[0] + 1   # ukloni komponente manje od 3 piksela (šum)
         predictions[np.isin(labeled, sum_labels)] = 0
 
     n_dep = predictions.sum()
@@ -425,10 +432,19 @@ def kreiraj_mapu(geometries):
         if geom.geom_type == 'Polygon':
             coords = [[y, x] for x, y in geom.exterior.coords]
             area   = geom.area * (111320 ** 2)
+            popup_html = f"<b>ML Deponija {i+1}</b><br>Površina: {area:.0f} m²"
             folium.Polygon(
                 locations=coords,
-                popup=f"<b>ML Deponija {i+1}</b><br>Površina: {area:.0f} m²",
+                popup=popup_html,
                 color='red', fill=True, fillColor='red', fillOpacity=0.5, weight=2
+            ).add_to(fg)
+            # Marker na centroidu — poligon sam po sebi nije uvek dovoljno uočljiv
+            centroid = geom.centroid
+            folium.Marker(
+                location=[centroid.y, centroid.x],
+                popup=popup_html,
+                tooltip=f"ML Deponija {i+1}",
+                icon=folium.Icon(color='red', icon='warning-sign', prefix='glyphicon')
             ).add_to(fg)
     fg.add_to(mapa)
 

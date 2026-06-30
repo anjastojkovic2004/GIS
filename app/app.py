@@ -14,6 +14,7 @@ import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, box
+from shapely import wkt as swkt
 import os
 from dotenv import load_dotenv
 
@@ -350,6 +351,11 @@ elif menu == "Kontejneri":
         else:
             st.warning("Prvo kreiraj lokaciju!")
             lokacija = None
+    col1, col2 = st.columns(2)
+    with col1:
+        k_lat = st.number_input("Geografska širina (lat)", format="%.4f", value=45.2552, key="k_lat")
+    with col2:
+        k_lon = st.number_input("Geografska dužina (lon)", format="%.4f", value=19.8362, key="k_lon")
 
     if st.button("Spremi kontejner"):
         if lokacija:
@@ -357,9 +363,9 @@ elif menu == "Kontejneri":
             cursor = conn.cursor()
             # NOW() upisuje trenutni datum kao datum postavljanja
             cursor.execute("""
-                INSERT INTO kontejneri (tip, kapacitet_litara, stanje, datum_postavljanja, lokacija_id)
-                VALUES (%s, %s, %s, NOW(), %s)
-            """, (tip, kapacitet, stanje, lokacija_id))
+                INSERT INTO kontejneri (tip, kapacitet_litara, stanje, datum_postavljanja, lokacija_id, geom)
+                VALUES (%s, %s, %s, NOW(), %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            """, (tip, kapacitet, stanje, lokacija_id, k_lon, k_lat))
             conn.commit()
             cursor.close()
             st.success("Kontejner uspešno dodat!")
@@ -692,12 +698,12 @@ elif menu == "Spatial Analiza":
 
         **Distanca** — izračunava geodetsku distancu između dve odabrane lokacije.
 
-        **Overlay Operacije** — 5 prostornih operacija nad lokacijama:
-        - Buffer (zaštitna zona 500m)
-        - Intersection (lokacije u buffer zonama)
+        **Overlay Operacije** — 5 prostornih operacija, zona rizika 3km oko deponija:
+        - Buffer (zona rizika 3km oko svake deponije)
+        - Intersection (koji gradovi padaju u zonu rizika)
         - Union (spajanje svih zona)
         - Clip (lokacije unutar Vojvodine)
-        - Difference (lokacije izvan buffer zona)
+        - Difference (gradovi izvan svih zona rizika)
 
         **Mapa** — SHP slojevi + podaci iz baze na satelitskoj podlozi.
         """)
@@ -743,17 +749,25 @@ elif menu == "Spatial Analiza":
         "SELECT id, naziv, ST_X(geom) as lon, ST_Y(geom) as lat FROM lokacije", conn
     )
 
-    if not lokacije_geo.empty:
+    # Učitaj deponije sa geometrijom — zona rizika se pravi oko deponija, ne lokacija
+    deponije_geo = pd.read_sql(
+        "SELECT id, naziv, status, ST_AsText(geom) as geom_wkt FROM deponije WHERE geom IS NOT NULL", conn
+    )
+
+    if not lokacije_geo.empty and not deponije_geo.empty:
         # Kreiraj GeoDataFrame od lokacija (tačke u WGS84)
         geometry = [Point(row['lon'], row['lat']) for _, row in lokacije_geo.iterrows()]
         gdf_lok = gpd.GeoDataFrame(lokacije_geo.copy(), geometry=geometry, crs='EPSG:4326')
-        # UTM projekcija za tačne metre u buffer operaciji
-        gdf_lok_utm = gdf_lok.to_crs('EPSG:32634')
 
-        # 1. BUFFER — zaštitna zona 500m oko svake lokacije
-        with st.expander("1. Buffer — zaštitna zona 500m oko svake lokacije"):
-            gdf_buf_utm = gdf_lok_utm.copy()
-            gdf_buf_utm['geometry'] = gdf_lok_utm.geometry.buffer(500)
+        # Kreiraj GeoDataFrame od deponija (pravi poligoni iz WKT)
+        dep_geometry = [swkt.loads(g) for g in deponije_geo['geom_wkt']]
+        gdf_dep = gpd.GeoDataFrame(deponije_geo.copy(), geometry=dep_geometry, crs='EPSG:4326')
+        gdf_dep_utm = gdf_dep.to_crs('EPSG:32634')
+
+        # 1. BUFFER — zona rizika 3km oko svake deponije
+        with st.expander("1. Buffer — zona rizika 3km oko svake deponije"):
+            gdf_buf_utm = gdf_dep_utm.copy()
+            gdf_buf_utm['geometry'] = gdf_dep_utm.geometry.buffer(3000)
             # Vrati u WGS84 za prikaz i daljnje operacije
             gdf_buf = gdf_buf_utm.to_crs('EPSG:4326')
             # Površina se računa u UTM (ha = m² / 10000)
@@ -764,62 +778,59 @@ elif menu == "Spatial Analiza":
             )
             st.caption(f"Ukupna kombinovana površina svih zona: {gdf_buf_utm.geometry.area.sum()/10000:.2f} ha")
 
-        # 2. INTERSECTION — koje lokacije ulaze u buffer zonu druge lokacije
-        with st.expander("2. Intersection — lokacije unutar buffer zona"):
+        # 2. INTERSECTION — koji gradovi padaju u zonu rizika neke deponije
+        with st.expander("2. Intersection — gradovi unutar zone rizika"):
             joined = gpd.sjoin(gdf_lok, gdf_buf[['naziv', 'geometry']], how='inner', predicate='intersects')
-            # Filtriramo lokaciju koja ne ulazi u svoju sopstvenu zonu
-            joined = joined[joined['naziv_left'] != joined['naziv_right']]
             if joined.empty:
-                st.info("Nijedna lokacija ne ulazi u buffer zonu druge lokacije.")
+                st.info("Nijedan grad ne pada u zonu rizika neke deponije.")
             else:
                 st.dataframe(
                     joined[['naziv_left', 'naziv_right']].rename(
-                        columns={'naziv_left': 'Lokacija', 'naziv_right': 'Unutar zone'}
+                        columns={'naziv_left': 'Grad', 'naziv_right': 'Deponija (zona rizika)'}
                     ),
                     use_container_width=True
                 )
                 st.caption(f"Pronađeno {len(joined)} preklapanja.")
 
-        # 3. UNION — spajanje svih buffer zona u jednu bez preklapanja
-        with st.expander("3. Union — spajanje svih buffer zona u jednu"):
-            # unary_union spaja sve geometrije u jednu
-            union_geom = gdf_buf_utm.geometry.unary_union
+        # 3. UNION — spajanje svih zona rizika u jednu bez preklapanja
+        with st.expander("3. Union — spajanje svih zona rizika u jednu"):
+            # union_all spaja sve geometrije u jednu
+            union_geom = gdf_buf_utm.geometry.union_all()
             union_area_ha = union_geom.area / 10000
             st.metric("Ukupna površina unije svih zona", f"{union_area_ha:.2f} ha")
-            st.caption("Union spaja sve buffer zone u jedan poligon eliminišući preklapanja.")
+            st.caption("Union spaja sve zone rizika u jedan poligon eliminišući preklapanja.")
 
-        # 4. CLIP — lokacije unutar bounding box Vojvodine
+        # 4. CLIP — lokacije unutar prave granice Vojvodine (ne bbox)
         with st.expander("4. Clip — lokacije unutar Vojvodine"):
-            # box() kreira pravougaoni poligon od min/max koordinata
-            clip_box_geom = box(18.8, 44.6, 21.7, 46.2)
-            gdf_clip_box  = gpd.GeoDataFrame([1], geometry=[clip_box_geom], crs='EPSG:4326')
+            # Prava administrativna granica (admin_level4) — bbox bi zahvatio
+            # i delove Rumunije/Mađarske jer Vojvodina nije pravougaonog oblika
+            shp_dir_clip = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'serbia_shp')
+            adminareas = gpd.read_file(os.path.join(shp_dir_clip, 'gis_osm_adminareas_a_free_1.shp'))
+            voj_geom = adminareas[adminareas['name'].str.contains('Војводина', na=False)].iloc[0].geometry
+            gdf_clip_box = gpd.GeoDataFrame([1], geometry=[voj_geom], crs='EPSG:4326')
             clipped = gpd.clip(gdf_lok, gdf_clip_box)
             st.dataframe(
                 clipped[['naziv', 'lon', 'lat']].rename(columns={'lon': 'Lon', 'lat': 'Lat'}),
                 use_container_width=True
             )
-            st.caption(f"{len(clipped)} od {len(gdf_lok)} lokacija je unutar bbox Vojvodine.")
+            st.caption(f"{len(clipped)} od {len(gdf_lok)} lokacija je unutar granice Vojvodine.")
 
-        # 5. DIFFERENCE — lokacije koje su van tuđih buffer zona
-        with st.expander("5. Difference — lokacije IZVAN buffer zona"):
+        # 5. DIFFERENCE — gradovi koji su van svih zona rizika
+        with st.expander("5. Difference — gradovi IZVAN zona rizika"):
             joined_all = gpd.sjoin(gdf_lok, gdf_buf[['naziv', 'geometry']], how='left', predicate='intersects')
-            # index_right IS NULL = lokacija nije ni u jednoj zoni
-            # naziv_left == naziv_right = lokacija je samo u svojoj zoni
-            outside = joined_all[
-                joined_all['index_right'].isna() |
-                (joined_all['naziv_left'] == joined_all['naziv_right'])
-            ].drop_duplicates(subset='id')
+            # index_right IS NULL = grad nije ni u jednoj zoni rizika
+            outside = joined_all[joined_all['index_right'].isna()].drop_duplicates(subset='id')
             if outside.empty:
-                st.info("Sve lokacije se nalaze unutar buffer zona.")
+                st.info("Svi gradovi se nalaze unutar neke zone rizika.")
             else:
                 # naziv_left jer sjoin preimeuje kolone kada oba DF-a imaju 'naziv'
                 st.dataframe(
                     outside[['naziv_left', 'lon', 'lat']].rename(columns={'naziv_left': 'naziv'}),
                     use_container_width=True
                 )
-                st.caption(f"{len(outside)} lokacija je izvan buffer zona ostalih lokacija.")
+                st.caption(f"{len(outside)} gradova je izvan svih zona rizika.")
     else:
-        st.warning("Nema lokacija za overlay operacije.")
+        st.warning("Nema lokacija ili deponija za overlay operacije.")
 
     st.divider()
 
@@ -861,9 +872,9 @@ elif menu == "Spatial Analiza":
     ).add_to(mapa)
     folium.TileLayer('OpenStreetMap', name='OpenStreetMap', overlay=False, control=True).add_to(mapa)
 
-    # Buffer zone sloj — podrazumevano isključen
-    if not lokacije_geo.empty:
-        fg_buf = folium.FeatureGroup(name='Buffer zone 500m', show=False)
+    # Zona rizika oko deponija — podrazumevano isključena
+    if not lokacije_geo.empty and not deponije_geo.empty:
+        fg_buf = folium.FeatureGroup(name='Zona rizika (3km)', show=False)
         for _, row in gdf_buf.iterrows():
             geom = row.geometry
             if geom is None:
@@ -876,7 +887,7 @@ elif menu == "Spatial Analiza":
             if coords:
                 folium.Polygon(
                     locations=coords,
-                    popup=f"Buffer zona: {row['naziv']}",
+                    popup=f"Zona rizika: {row['naziv']}",
                     color='blue', fill=True, fillColor='blue',
                     fillOpacity=0.15, weight=2, dashArray='5,5'
                 ).add_to(fg_buf)

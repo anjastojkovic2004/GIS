@@ -9,6 +9,7 @@ import folium
 import pandas as pd
 import psycopg2
 from shapely.geometry import Point
+from shapely import wkt as swkt
 import urllib.request
 import zipfile
 import os
@@ -94,9 +95,10 @@ def ucitaj_podatke_iz_baze():
     df_lokacije = pd.DataFrame(rows,
         columns=['id', 'naziv', 'opstina', 'adresa', 'tip_podrucja', 'lon', 'lat'])
 
-    # Kontejneri — JOIN sa lokacijama za prikaz naziva lokacije
+    # Kontejneri — sopstvena geom koordinata (ne koordinata grada), JOIN za naziv lokacije
     df_kontejneri = pd.read_sql("""
         SELECT k.id, k.tip, k.stanje, k.kapacitet_litara,
+               ST_X(k.geom) as lon, ST_Y(k.geom) as lat,
                l.naziv as lokacija, l.id as lokacija_id
         FROM kontejneri k
         JOIN lokacije l ON k.lokacija_id = l.id
@@ -235,18 +237,13 @@ def kreiraj_mapu(df_lokacije, df_kontejneri, deponije_data, gdf_places, gdf_land
         ).add_to(fg_lokacije)
     fg_lokacije.add_to(mapa)
 
-    # ── Sloj 4: Kontejneri (boja po stanju) ──
+    # ── Sloj 4: Kontejneri (sopstvena OSM koordinata, boja po stanju) ──
     fg_kontejneri = folium.FeatureGroup(name='Kontejneri (baza)', show=True)
     for _, row in df_kontejneri.iterrows():
-        # Pronađi koordinate lokacije kontejnera
-        lok = df_lokacije[df_lokacije['id'] == row['lokacija_id']]
-        if lok.empty:
-            continue
-        lat, lon = lok.iloc[0][['lat', 'lon']]
         # Zeleno = dobro, narandžasto = oštećen, crveno = loše
         color = 'green' if row['stanje'] == 'dobro' else ('orange' if row['stanje'] == 'ostecen' else 'red')
         folium.Marker(
-            location=[lat, lon],
+            location=[row['lat'], row['lon']],
             popup=(f"<b>{row['tip']}</b><br>"
                    f"Stanje: {row['stanje']}<br>"
                    f"Kapacitet: {row['kapacitet_litara']} L<br>"
@@ -256,26 +253,36 @@ def kreiraj_mapu(df_lokacije, df_kontejneri, deponije_data, gdf_places, gdf_land
         ).add_to(fg_kontejneri)
     fg_kontejneri.add_to(mapa)
 
-    # ── Sloj 5: Deponije (poligoni, boja po statusu) ──
+    # ── Sloj 5: Deponije (poligon + marker na centroidu, boja po statusu) ──
     fg_deponije = folium.FeatureGroup(name='Deponije (baza)', show=True)
     for deponija in deponije_data:
         _, naziv, povrsina, tip_otpada, status, geom_text = deponija
-        if not geom_text or 'POLYGON' not in geom_text:
+        if not geom_text:
             continue
         # Crveno = aktivna, narandžasto = u sanaciji, zeleno = sanirana
         color = 'red' if status == 'aktivna' else ('orange' if status == 'u sanaciji' else 'green')
-        # Parsiranje WKT stringa u koordinate za folium
-        coords_str = geom_text.replace('POLYGON((', '').replace('))', '').strip()
+        popup_html = (f"<b>{naziv}</b><br>"
+                      f"Površina: {povrsina} m²<br>"
+                      f"Tip: {tip_otpada}<br>"
+                      f"Status: {status}")
         try:
-            coords = [[float(y), float(x)] for x, y in [c.split() for c in coords_str.split(',')]]
+            geom = swkt.loads(geom_text)
+            if geom.geom_type == 'MultiPolygon':
+                geom = list(geom.geoms)[0]
+            coords = [[y, x] for x, y in geom.exterior.coords]
             folium.Polygon(
                 locations=coords,
-                popup=(f"<b>{naziv}</b><br>"
-                       f"Površina: {povrsina} m²<br>"
-                       f"Tip: {tip_otpada}<br>"
-                       f"Status: {status}"),
+                popup=popup_html,
                 color=color, fill=True, fillColor=color,
                 fillOpacity=0.5, weight=2
+            ).add_to(fg_deponije)
+            # Marker na centroidu — poligon sam po sebi nije uvek dovoljno uočljiv
+            centroid = geom.centroid
+            folium.Marker(
+                location=[centroid.y, centroid.x],
+                popup=popup_html,
+                tooltip=naziv,
+                icon=folium.Icon(color=color, icon='warning-sign', prefix='glyphicon')
             ).add_to(fg_deponije)
         except Exception:
             continue  # Preskoči deponije sa nevalidnom geometrijom

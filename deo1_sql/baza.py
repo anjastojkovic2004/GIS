@@ -166,7 +166,8 @@ def kreiraj_tabele():
             kapacitet_litara INTEGER,
             stanje VARCHAR(20),
             datum_postavljanja DATE,
-            lokacija_id INTEGER REFERENCES lokacije(id)
+            lokacija_id INTEGER REFERENCES lokacije(id),
+            geom GEOMETRY(Point, 4326)  -- stvarna OSM koordinata kontejnera
         );
 
         CREATE TABLE deponije (
@@ -221,10 +222,11 @@ def kreiraj_tabele():
     print("Komunalna preduzeća uneta!")
 
     # ── Punjenje kontejnera (spatial join na najbliži grad) ──
-    # Konverzija u UTM za tačan spatial join u metrima
-    gradovi_gdf = gpd.GeoDataFrame(gradovi, geometry='geometry', crs='EPSG:4326')
-    gradovi_utm = gradovi_gdf.to_crs('EPSG:32634')
-    kontejneri_utm = kontejneri_gdf[['osm_id', 'fclass', 'geometry']].to_crs('EPSG:32634')
+    # WGS84 čuvamo za upis prave koordinate, UTM samo za sjoin_nearest u metrima
+    gradovi_gdf    = gpd.GeoDataFrame(gradovi, geometry='geometry', crs='EPSG:4326')
+    gradovi_utm    = gradovi_gdf.to_crs('EPSG:32634')
+    kontejneri_wgs84 = kontejneri_gdf[['osm_id', 'fclass', 'geometry']].copy()
+    kontejneri_utm   = kontejneri_wgs84.to_crs('EPSG:32634')
 
     # Svaki kontejner se dodeljuje najbližem gradu
     joined_k = gpd.sjoin_nearest(
@@ -240,16 +242,18 @@ def kreiraj_tabele():
                 '2022-09-05','2023-01-18','2023-07-22','2024-02-14']
     stanja   = ['dobro','dobro','dobro','ostecen','lose']
 
-    for _, row in joined_k.iterrows():
+    for idx, row in joined_k.iterrows():
         grad_oid = row.get('grad_osm_id')
         lok_id   = lok_map.get(grad_oid)
         if lok_id is None or uneseno.get(grad_oid, 0) >= 5:
             continue
         tip, kapacitet = TIP_MAP[row['fclass']]
+        geom_wgs84 = kontejneri_wgs84.loc[idx, 'geometry']
         cursor.execute("""
-            INSERT INTO kontejneri (tip, kapacitet_litara, stanje, datum_postavljanja, lokacija_id)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (tip, kapacitet, random.choice(stanja), random.choice(datumi_k), lok_id))
+            INSERT INTO kontejneri (tip, kapacitet_litara, stanje, datum_postavljanja, lokacija_id, geom)
+            VALUES (%s, %s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+        """, (tip, kapacitet, random.choice(stanja), random.choice(datumi_k), lok_id,
+              geom_wgs84.x, geom_wgs84.y))
         uneseno[grad_oid] = uneseno.get(grad_oid, 0) + 1
         k_count += 1
     conn.commit()

@@ -9,15 +9,30 @@ import pandas as pd
 import psycopg2
 import os
 from shapely.geometry import Point, box
+from shapely import wkt as swkt
 from dotenv import load_dotenv
 
 # Učitava DB_URL iz .env fajla
 load_dotenv()
 DB_URL = os.environ.get("DB_URL")
 
+SHP_DIR = os.path.join(os.path.dirname(__file__), '..', 'serbia_shp')
+
+
 def get_connection():
     """Otvara konekciju na PostgreSQL/PostGIS bazu."""
     return psycopg2.connect(DB_URL)
+
+
+def ucitaj_vojvodina_granicu():
+    """
+    Učitava pravu administrativnu granicu Vojvodine (admin_level4) iz OSM SHP-a.
+    Koristi se umesto pravougaonog bbox-a jer Vojvodina nije pravougaonog oblika —
+    bbox bi zahvatio i delove susednih zemalja (Rumunija, Mađarska).
+    """
+    adminareas = gpd.read_file(os.path.join(SHP_DIR, 'gis_osm_adminareas_a_free_1.shp'))
+    voj = adminareas[adminareas['name'].str.contains('Војводина', na=False)]
+    return voj.iloc[0].geometry
 
 def ucitaj_podatke():
     """Učitava lokacije i deponije iz baze za prostorne analize."""
@@ -40,22 +55,25 @@ def ucitaj_podatke():
 # SPATIAL OPERACIJE
 # ═══════════════════════════════════════════════
 
-def buffer_operacija(lokacije_df):
+def buffer_operacija(deponije_df):
     """
-    BUFFER — Kreira zaštitnu zonu od 500m oko svake lokacije.
+    BUFFER — Kreira zonu rizika od 3km oko svake deponije.
+    Bafer se pravi oko deponija (ne lokacija/gradova) jer to ima realno
+    značenje — sanitarna zaštitna zona oko deponije zbog zagađenja,
+    smrada i rizika po podzemne vode. Buffer se primenjuje na pravi
+    poligon deponije, ne na jednu tačku, pa zona prati njen stvarni oblik.
     Konverzija u UTM (EPSG:32634) je neophodna jer buffer u WGS84 stepenima
     ne daje precizne metre — UTM koristi metre kao jedinicu.
     """
-    print("1. BUFFER OPERACIJA — Kreiraj zaštitnu zonu od 500m oko lokacija")
+    print("1. BUFFER OPERACIJA — Kreiraj zonu rizika od 3km oko deponija")
 
-    # Kreiraj GeoDataFrame od DataFrame-a sa koordinatama
-    geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
-    gdf = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
+    geometry = [swkt.loads(g) for g in deponije_df['geom']]
+    gdf = gpd.GeoDataFrame(deponije_df, geometry=geometry, crs='EPSG:4326')
 
     # Projekcija u UTM zonu 34N za tačan buffer u metrima
     gdf_utm = gdf.to_crs('EPSG:32634')
     gdf_buffer = gdf_utm.copy()
-    gdf_buffer['geometry'] = gdf_utm.geometry.buffer(500)  # 500 metara
+    gdf_buffer['geometry'] = gdf_utm.geometry.buffer(3000)  # 3km
     # Vrati nazad u WGS84 za prikaz na mapi
     gdf_buffer = gdf_buffer.to_crs('EPSG:4326')
 
@@ -64,27 +82,27 @@ def buffer_operacija(lokacije_df):
 
 def intersection_operacija(lokacije_df, buffer_zone):
     """
-    INTERSECTION — Pronalazi koje lokacije se nalaze unutar buffer zone druge lokacije.
+    INTERSECTION — Pronalazi koje lokacije (gradovi) padaju u zonu rizika neke deponije.
     gpd.sjoin sa predicate='intersects' vrši prostorni join između tačaka i poligona.
     """
-    print("\n2. INTERSECTION — Koja lokacija se nalazi u drugoj zaštitnoj zoni?")
+    print("\n2. INTERSECTION — Koji gradovi se nalaze u zoni rizika neke deponije?")
 
     geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
 
-    # Spatial join — pronađi sve parove (lokacija, buffer_zona) koji se seku
+    # Spatial join — pronađi sve parove (lokacija, zona_rizika) koji se seku
     intersections = gpd.sjoin(gdf_lokacije, buffer_zone, how='inner', predicate='intersects')
 
-    print(f"Pronađeno {len(intersections)} lokacija u zaštitnim zonama")
+    print(f"Pronađeno {len(intersections)} gradova u zoni rizika deponija")
     print(intersections[['naziv_left', 'naziv_right']])
     return intersections
 
 def union_operacija(buffer_zone):
     """
-    UNION — Spaja sve buffer zone u jedan poligon eliminišući preklapanja.
+    UNION — Spaja sve zone rizika deponija u jedan poligon eliminišući preklapanja.
     union_all() je geopandas metoda koja objedinjuje sve geometrije u jednu.
     """
-    print("\n3. UNION — Spoji sve zaštitne zone u jedan poligon")
+    print("\n3. UNION — Spoji sve zone rizika u jedan poligon")
 
     union_geom = buffer_zone.geometry.union_all()
 
@@ -96,19 +114,19 @@ def union_operacija(buffer_zone):
 def clip_operacija(lokacije_df):
     """
     CLIP — Iseca samo lokacije koje se nalaze unutar granica Vojvodine.
-    box() kreira pravougaoni poligon od bounding box koordinata.
+    Koristi pravu administrativnu granicu (ne pravougaoni bbox koji bi
+    zahvatio i deo Rumunije/Mađarske jer Vojvodina nije pravougaonog oblika).
     gpd.clip() vraća samo geometrije koje se nalaze unutar klipujućeg poligona.
     """
     print("\n4. CLIP — Iseci samo lokacije u području Vojvodine")
 
-    # Definiši klipujuću zonu kao bbox Vojvodine
-    clip_box = box(18.8, 44.6, 21.7, 46.2)
-    gdf_clip = gpd.GeoDataFrame([1], geometry=[clip_box], crs='EPSG:4326')
+    voj_geom = ucitaj_vojvodina_granicu()
+    gdf_clip = gpd.GeoDataFrame([1], geometry=[voj_geom], crs='EPSG:4326')
 
     geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
 
-    # Clip — zadrži samo lokacije unutar kvadrata Vojvodine
+    # Clip — zadrži samo lokacije unutar prave granice Vojvodine
     clipped = gpd.clip(gdf_lokacije, gdf_clip)
 
     print(f"Pronađeno {len(clipped)} lokacija u klipovanoj zoni")
@@ -117,11 +135,11 @@ def clip_operacija(lokacije_df):
 
 def difference_operacija(lokacije_df, buffer_zone):
     """
-    DIFFERENCE — Pronalazi lokacije koje se nalaze IZVAN svih buffer zona.
+    DIFFERENCE — Pronalazi gradove koji se nalaze IZVAN svih zona rizika deponija.
     Left join + filtriranje po index_right IS NULL daje redove bez para u desnom DataFrame-u.
     Nakon sjoin obe tabele imaju 'naziv' pa se kolone preimeuju u naziv_left i naziv_right.
     """
-    print("\n5. DIFFERENCE — Lokacije IZVAN zaštitnih zona")
+    print("\n5. DIFFERENCE — Gradovi IZVAN zona rizika deponija")
 
     geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
@@ -130,12 +148,12 @@ def difference_operacija(lokacije_df, buffer_zone):
     joined = gpd.sjoin(gdf_lokacije, buffer_zone, how='left', predicate='intersects')
     difference_result = joined[joined['index_right'].isna()]
 
-    print(f"Pronađeno {len(difference_result)} lokacija izvan zaštitnih zona")
+    print(f"Pronađeno {len(difference_result)} gradova izvan zona rizika")
     if len(difference_result) > 0:
         # naziv_left jer sjoin preimeuje kolone kada oba DF-a imaju kolonu 'naziv'
         print(difference_result[['naziv_left']].rename(columns={'naziv_left': 'naziv'}))
     else:
-        print("Sve lokacije se nalaze u zaštitnim zonama")
+        print("Svi gradovi se nalaze u nekoj zoni rizika")
     return difference_result
 
 
@@ -145,27 +163,27 @@ def difference_operacija(lokacije_df, buffer_zone):
 
 def query_within(lokacije_df, buffer_zone):
     """
-    WITHIN — Pronalazi lokacije koje se nalaze UNUTAR unije svih buffer zona.
+    WITHIN — Pronalazi gradove koji se nalaze UNUTAR unije svih zona rizika.
     .within() vraca True za tačke koje su potpuno unutar poligona.
     """
-    print("\nQUERY 1: WITHIN — Lokacije UNUTAR zaštitne zone")
+    print("\nQUERY 1: WITHIN — Gradovi UNUTAR zone rizika deponija")
 
     geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
 
-    # union_all() spaja sve buffer zone, then within proverava svaku tačku
+    # union_all() spaja sve zone rizika, then within proverava svaku tačku
     result = gdf_lokacije[gdf_lokacije.geometry.within(buffer_zone.geometry.union_all())]
 
-    print(f"Pronađeno {len(result)} lokacija")
+    print(f"Pronađeno {len(result)} gradova")
     print(result[['naziv']])
     return result
 
 def query_overlaps(lokacije_df, buffer_zone):
     """
-    OVERLAPS — Pronalazi lokacije koje se PREKLAPAJU sa buffer zonama.
+    OVERLAPS — Pronalazi gradove koji se PREKLAPAJU sa zonama rizika.
     Koristi sjoin sa predicate='intersects' koji pokriva i within i crosses.
     """
-    print("\nQUERY 2: OVERLAPS — Lokacije koje se preklapaju")
+    print("\nQUERY 2: OVERLAPS — Gradovi koji se preklapaju sa zonom rizika")
 
     geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
@@ -178,10 +196,10 @@ def query_overlaps(lokacije_df, buffer_zone):
 
 def query_contains(lokacije_df, buffer_zone):
     """
-    CONTAINS — Pronalazi buffer zone koje SADRŽE lokacije.
+    CONTAINS — Pronalazi zone rizika koje SADRŽE neki grad.
     predicate='within' znači da leva geometrija mora biti unutar desne.
     """
-    print("\nQUERY 3: CONTAINS — Zaštitne zone koje sadrže lokacije")
+    print("\nQUERY 3: CONTAINS — Zone rizika koje sadrže neki grad")
 
     geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
@@ -210,18 +228,18 @@ def query_distance(lokacije_df):
 
 def query_disjoint(lokacije_df, buffer_zone):
     """
-    DISJOINT — Pronalazi lokacije koje se NE dodiruju ni sa jednom buffer zonom.
+    DISJOINT — Pronalazi gradove koji se NE dodiruju ni sa jednom zonom rizika.
     ~ operátor negira boolean seriju (ekvivalent NOT u SQL-u).
     """
-    print("\nQUERY 5: DISJOINT — Lokacije koje se NE dodiruju sa zonom")
+    print("\nQUERY 5: DISJOINT — Gradovi koji se NE dodiruju ni sa jednom zonom rizika")
 
     geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
     gdf_lokacije = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
 
-    # Pronađi lokacije koje NE seku uniju svih buffer zona
+    # Pronađi gradove koji NE seku uniju svih zona rizika
     result = gdf_lokacije[~gdf_lokacije.geometry.intersects(buffer_zone.geometry.union_all())]
 
-    print(f"Pronađeno {len(result)} disjunktnih lokacija")
+    print(f"Pronađeno {len(result)} gradova van svih zona rizika")
     print(result[['naziv']])
     return result
 
@@ -238,7 +256,7 @@ if __name__ == "__main__":
     print(lokacije_df)
 
     # ── 5 SPATIAL OPERACIJA ──
-    buffer_zone = buffer_operacija(lokacije_df)
+    buffer_zone = buffer_operacija(deponije)
     intersection_operacija(lokacije_df, buffer_zone)
     union_geom = union_operacija(buffer_zone)
     clipped = clip_operacija(lokacije_df)

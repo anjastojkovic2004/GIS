@@ -1,6 +1,6 @@
 """
 mapa_spatial_operacije.py — Interaktivna mapa prostornih operacija
-Vizuelizuje lokacije, buffer zone (10km), clip zonu Vojvodine
+Vizuelizuje lokacije, zone rizika (3km) oko deponija, clip zonu Vojvodine
 i linije distanci između lokacija na folium mapi.
 """
 
@@ -9,6 +9,7 @@ import pandas as pd
 import psycopg2
 import os
 from shapely.geometry import Point
+from shapely import wkt as swkt
 import folium
 from dotenv import load_dotenv
 
@@ -16,26 +17,40 @@ from dotenv import load_dotenv
 load_dotenv()
 DB_URL = os.environ.get("DB_URL")
 
+SHP_DIR = os.path.join(os.path.dirname(__file__), '..', 'serbia_shp')
+
+
 def get_connection():
     """Otvara konekciju na PostgreSQL/PostGIS bazu."""
     return psycopg2.connect(DB_URL)
 
+
+def ucitaj_vojvodina_granicu():
+    """Učitava pravu administrativnu granicu Vojvodine (admin_level4) iz OSM SHP-a."""
+    adminareas = gpd.read_file(os.path.join(SHP_DIR, 'gis_osm_adminareas_a_free_1.shp'))
+    voj = adminareas[adminareas['name'].str.contains('Војводина', na=False)]
+    return voj.iloc[0].geometry
+
 def ucitaj_podatke():
-    """Učitava lokacije iz baze (naziv i koordinate)."""
+    """Učitava lokacije i deponije iz baze."""
     conn = get_connection()
     lokacije_df = pd.read_sql("""
         SELECT id, naziv, ST_X(geom) as lon, ST_Y(geom) as lat FROM lokacije
     """, conn)
+    deponije_df = pd.read_sql("""
+        SELECT id, naziv, status, ST_AsText(geom) as geom FROM deponije WHERE geom IS NOT NULL
+    """, conn)
     conn.close()
-    return lokacije_df
+    return lokacije_df, deponije_df
 
-def kreiraj_mapu_spatial(lokacije_df):
+def kreiraj_mapu_spatial(lokacije_df, deponije_df):
     """
-    Kreira interaktivnu folium mapu sa 4 sloja:
+    Kreira interaktivnu folium mapu sa 5 slojeva:
     1. Lokacije — plavi markeri
-    2. Buffer zone (10km) — zeleni poligoni oko svake lokacije
-    3. Clip zona — žuti kvadrat koji predstavlja granice Vojvodine
-    4. Distanca — crvene linije između susednih lokacija
+    2. Deponije — poligoni u boji po statusu
+    3. Zona rizika (3km) — zeleni poligoni oko svake deponije
+    4. Clip zona — žuti poligon koji predstavlja pravu granicu Vojvodine
+    5. Distanca — crvene linije između susednih lokacija
     Svi slojevi se mogu uključiti/isključiti putem LayerControl-a.
     """
     print("Pravljenje mape sa spatial operacijama...")
@@ -43,13 +58,13 @@ def kreiraj_mapu_spatial(lokacije_df):
     mapa = folium.Map(tiles='OpenStreetMap')
     mapa.fit_bounds([[44.6, 18.8], [46.2, 21.7]])
 
-    # ── Kreiraj buffer zone oko lokacija ──
+    # ── Kreiraj zonu rizika 3km oko deponija ──
     # Konverzija u UTM za tačan buffer u metrima, pa nazad u WGS84 za folium
-    geometry = [Point(xy) for xy in zip(lokacije_df['lon'], lokacije_df['lat'])]
-    gdf = gpd.GeoDataFrame(lokacije_df, geometry=geometry, crs='EPSG:4326')
-    gdf_utm = gdf.to_crs('EPSG:32634')
-    gdf_buffer = gdf_utm.copy()
-    gdf_buffer['geometry'] = gdf_utm.geometry.buffer(10000)  # 10km radius
+    dep_geometry = [swkt.loads(g) for g in deponije_df['geom']]
+    gdf_dep = gpd.GeoDataFrame(deponije_df, geometry=dep_geometry, crs='EPSG:4326')
+    gdf_dep_utm = gdf_dep.to_crs('EPSG:32634')
+    gdf_buffer = gdf_dep_utm.copy()
+    gdf_buffer['geometry'] = gdf_dep_utm.geometry.buffer(3000)  # 3km radius
     gdf_buffer = gdf_buffer.to_crs('EPSG:4326')
 
     # ── Sloj 1: Lokacije (plavi markeri) ──
@@ -66,14 +81,29 @@ def kreiraj_mapu_spatial(lokacije_df):
         ).add_to(fg_lokacije)
     fg_lokacije.add_to(mapa)
 
-    # ── Sloj 2: Buffer zone 10km (zeleni poligoni) ──
-    fg_buffer = folium.FeatureGroup(name='Buffer zone (10km)', show=True)
+    # ── Sloj 2: Deponije (poligoni u boji po statusu) ──
+    fg_deponije = folium.FeatureGroup(name='Deponije', show=True)
+    status_boje = {'aktivna': 'red', 'u sanaciji': 'orange', 'sanirana': 'darkgreen'}
+    for _, row in gdf_dep.iterrows():
+        color = status_boje.get(row['status'], 'gray')
+        geom = row.geometry
+        if geom.geom_type == 'MultiPolygon':
+            geom = list(geom.geoms)[0]
+        folium.Polygon(
+            locations=[(lat, lon) for lon, lat in geom.exterior.coords],
+            popup=f"<b>{row['naziv']}</b><br>Status: {row['status']}",
+            color=color, fill=True, fillColor=color, fillOpacity=0.5, weight=2
+        ).add_to(fg_deponije)
+    fg_deponije.add_to(mapa)
+
+    # ── Sloj 3: Zona rizika 3km oko deponija (zeleni poligoni) ──
+    fg_buffer = folium.FeatureGroup(name='Zona rizika (3km)', show=True)
     for _, row in gdf_buffer.iterrows():
         # exterior.coords vraća koordinate granice poligona
         # folium koristi (lat, lon) redosled — zato swap lon,lat
         folium.Polygon(
             locations=[(lat, lon) for lon, lat in row.geometry.exterior.coords],
-            popup=f"<b>Buffer: {row['naziv']}</b><br>Radijus: 10km",
+            popup=f"<b>Zona rizika: {row['naziv']}</b><br>Radijus: 3km",
             color='green',
             fill=True,
             fillColor='lightgreen',
@@ -82,18 +112,15 @@ def kreiraj_mapu_spatial(lokacije_df):
         ).add_to(fg_buffer)
     fg_buffer.add_to(mapa)
 
-    # ── Sloj 3: Clip zona — granice Vojvodine (narandžasti kvadrat) ──
+    # ── Sloj 3: Clip zona — prava granica Vojvodine (ne pravougaonik) ──
     fg_clip = folium.FeatureGroup(name='Clip zona', show=True)
-    clip_coords = [
-        [44.6, 18.8],  # donji levi ugao
-        [44.6, 21.7],  # donji desni ugao
-        [46.2, 21.7],  # gornji desni ugao
-        [46.2, 18.8],  # gornji levi ugao
-        [44.6, 18.8]   # zatvaranje poligona
-    ]
+    voj_geom = ucitaj_vojvodina_granicu()
+    if voj_geom.geom_type == 'MultiPolygon':
+        voj_geom = list(voj_geom.geoms)[0]
+    clip_coords = [[y, x] for x, y in voj_geom.exterior.coords]
     folium.Polygon(
         locations=clip_coords,
-        popup="<b>Clip zona</b><br>Područje Vojvodine",
+        popup="<b>Clip zona</b><br>Granica Vojvodine",
         color='orange',
         fill=True,
         fillColor='yellow',
@@ -129,11 +156,14 @@ def kreiraj_mapu_spatial(lokacije_df):
      <b style="color: blue;">● Lokacije</b><br>
      Tačke sa lokacijama<br><br>
 
-     <b style="color: green;">◾ Buffer zone (10km)</b><br>
-     Zaštitne zone od 10km<br><br>
+     <b style="color: red;">◾ Deponije</b><br>
+     Crveno=aktivna, narandžasto=u sanaciji, zeleno=sanirana<br><br>
+
+     <b style="color: green;">◾ Zona rizika (3km)</b><br>
+     Zona rizika oko deponija<br><br>
 
      <b style="color: orange;">◾ Clip zona</b><br>
-     Kvadrat oblasti od interesa<br><br>
+     Granica Vojvodine<br><br>
 
      <b style="color: red;">— Distanca</b><br>
      Linije između lokacija<br>
@@ -147,9 +177,9 @@ def kreiraj_mapu_spatial(lokacije_df):
     print(f"Mapa sačuvana kao '{out_path}'")
 
 if __name__ == "__main__":
-    lokacije_df = ucitaj_podatke()
+    lokacije_df, deponije_df = ucitaj_podatke()
     print("\nLOKACIJE:")
     print(lokacije_df)
 
-    kreiraj_mapu_spatial(lokacije_df)
+    kreiraj_mapu_spatial(lokacije_df, deponije_df)
     print("\nSPATIAL MAPA GOTOVA!")
