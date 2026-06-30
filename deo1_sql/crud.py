@@ -7,12 +7,10 @@ lokacije, komunalna_preduzeca, kontejneri, deponije, inspekcije
 import psycopg2
 import pandas as pd
 import os
+from dotenv import load_dotenv
 
-# URL konekcije se učitava iz env varijable, uz fallback na hardkodirani string
-DB_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres.vtmpqdgrtntctvbusxec:NoviSad2024!@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
-)
+load_dotenv()
+DB_URL = os.environ.get("DB_URL")
 
 def get_connection():
     """Otvara i vraća novu konekciju na PostgreSQL bazu."""

@@ -826,6 +826,17 @@ elif menu == "Spatial Analiza":
     # ── Mapa sa SHP slojevima i bazom ─────────
     st.subheader("Mapa sa SHP slojevima i satelitskom podlogom")
 
+    st.caption("Simbologija — izaberi boje za prikaz na mapi ispod")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        boja_lok = st.color_picker("Lokacije", "#0000FF")
+    with col2:
+        boja_aktivna = st.color_picker("Deponija — aktivna", "#FF0000")
+    with col3:
+        boja_sanacija = st.color_picker("Deponija — u sanaciji", "#FFA500")
+    with col4:
+        boja_sanirana = st.color_picker("Deponija — sanirana", "#008000")
+
     lokacije_data = pd.read_sql(
         "SELECT id, naziv, ST_X(geom) as lon, ST_Y(geom) as lat FROM lokacije", conn
     )
@@ -924,22 +935,27 @@ elif menu == "Spatial Analiza":
         except Exception:
             pass
 
-    # Sloj — lokacije iz baze (plavi markeri)
+    # Sloj — lokacije iz baze (boja podešena u color_picker iznad)
     fg_lok = folium.FeatureGroup(name='Lokacije (baza)', show=True)
     for _, row in lokacije_data.iterrows():
-        folium.Marker(
+        folium.CircleMarker(
             location=[row['lat'], row['lon']],
+            radius=8,
             popup=f"<b>{row['naziv']}</b>",
             tooltip=row['naziv'],
-            icon=folium.Icon(color='blue', icon='info-sign')
+            color=boja_lok, fill=True, fillColor=boja_lok, fillOpacity=0.8
         ).add_to(fg_lok)
     fg_lok.add_to(mapa)
 
-    # Sloj — deponije iz baze (markeri boje po statusu)
+    # Sloj — deponije iz baze (boja po statusu, podešava se u color_picker iznad)
     fg_dep = folium.FeatureGroup(name='Deponije (baza)', show=True)
+    status_boje = {
+        'aktivna': boja_aktivna,
+        'u sanaciji': boja_sanacija,
+        'sanirana': boja_sanirana,
+    }
     for _, row in deponije_data.iterrows():
-        # Crveno = aktivna, narandžasto = u sanaciji, zeleno = sanirana
-        color = 'red' if row['status'] == 'aktivna' else ('orange' if row['status'] == 'u sanaciji' else 'green')
+        color = status_boje.get(row['status'], boja_aktivna)
         folium.CircleMarker(
             location=[row['lat'], row['lon']],
             radius=10,
