@@ -26,6 +26,22 @@ def get_connection():
     """Otvara novu konekciju na PostgreSQL/PostGIS bazu."""
     return psycopg2.connect(DB_URL)
 
+
+@st.cache_data
+def ucitaj_shp_sloj(shp_path, max_objekata=800):
+    """
+    Učitava i filtrira SHP sloj na bbox Vojvodine, sa ograničenjem broja
+    objekata. Ceo Vojvodina landuse sloj ima ~96.000 poligona — renderovanje
+    svih u folium petlji praktično zamrzava stranicu, pa se uzima nasumični
+    uzorak. @st.cache_data čuva rezultat u memoriji da se SHP ne učitava
+    iznova pri svakom kliku na bilo koji widget u aplikaciji.
+    """
+    gdf = gpd.read_file(shp_path)
+    gdf = gdf.cx[18.8:21.7, 44.6:46.2]
+    if len(gdf) > max_objekata:
+        gdf = gdf.sample(max_objekata, random_state=42)
+    return gdf
+
 # Konfiguracija stranice — wide layout za bolje korišćenje ekrana
 st.set_page_config(page_title="GIS Upravljanje Otpadom", layout="wide", initial_sidebar_state="expanded")
 st.title("GIS Sistem za upravljanje otpadom — Vojvodina")
@@ -71,6 +87,11 @@ if menu == "Dashboard":
     stanje_stats = pd.read_sql("SELECT stanje, COUNT(*) as broj FROM kontejneri GROUP BY stanje", conn)
     status_stats = pd.read_sql("SELECT status, COUNT(*) as broj FROM deponije GROUP BY status", conn)
     lokacije_data = pd.read_sql("SELECT id, naziv, ST_X(geom) as lon, ST_Y(geom) as lat FROM lokacije", conn)
+    deponije_data = pd.read_sql("""
+        SELECT naziv, status, povrsina_m2,
+               ST_X(ST_Centroid(geom)) as lon, ST_Y(ST_Centroid(geom)) as lat
+        FROM deponije WHERE geom IS NOT NULL
+    """, conn)
     conn.close()
 
     # Metrike u 3 kolone
@@ -89,24 +110,35 @@ if menu == "Dashboard":
         st.bar_chart(status_stats.set_index('status')['broj'])
 
     st.divider()
-    st.subheader("Mapa lokacija")
+    st.subheader("Mapa lokacija i deponija")
 
-    # Osnovna mapa sa satelitskom podlogom i markerima lokacija
     mapa = folium.Map(location=[45.25, 20.0], zoom_start=8)
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        attr='Esri World Imagery',
-        name='Satelitska podloga',
-        overlay=False,
-        control=True
+        attr='Esri World Imagery', name='Satelitska podloga', overlay=False, control=True
     ).add_to(mapa)
 
+    fg_lok = folium.FeatureGroup(name='Lokacije', show=True)
     for _, row in lokacije_data.iterrows():
         folium.Marker(
             location=[row['lat'], row['lon']],
             popup=f"<b>{row['naziv']}</b>",
             tooltip=row['naziv']
-        ).add_to(mapa)
+        ).add_to(fg_lok)
+    fg_lok.add_to(mapa)
+
+    fg_dep = folium.FeatureGroup(name='Deponije', show=True)
+    status_boje = {'aktivna': 'red', 'u sanaciji': 'orange', 'sanirana': 'green', 'detektovana': 'darkred'}
+    for _, row in deponije_data.iterrows():
+        color = status_boje.get(row['status'], 'gray')
+        folium.CircleMarker(
+            location=[row['lat'], row['lon']],
+            radius=6,
+            popup=f"<b>{row['naziv']}</b><br>Status: {row['status']}<br>Površina: {row['povrsina_m2']:.0f} m²",
+            tooltip=row['naziv'],
+            color=color, fill=True, fillColor=color, fillOpacity=0.7
+        ).add_to(fg_dep)
+    fg_dep.add_to(mapa)
 
     folium.LayerControl().add_to(mapa)
     st_folium(mapa, width=700, height=500)
@@ -898,9 +930,7 @@ elif menu == "Spatial Analiza":
     places_shp = os.path.join(shp_dir, 'gis_osm_places_free_1.shp')
     if os.path.exists(places_shp):
         try:
-            gdf_places = gpd.read_file(places_shp)
-            # Filtriraj na bbox Vojvodine
-            novi_sad_box = gdf_places.cx[18.8:21.7, 44.6:46.2]
+            novi_sad_box = ucitaj_shp_sloj(places_shp, max_objekata=800)
             fg_places = folium.FeatureGroup(name='OSM Mesta (SHP)', show=False)
             for _, row in novi_sad_box.iterrows():
                 if row.geometry is not None and row.geometry.geom_type == 'Point':
@@ -918,8 +948,7 @@ elif menu == "Spatial Analiza":
     landuse_shp = os.path.join(shp_dir, 'gis_osm_landuse_a_free_1.shp')
     if os.path.exists(landuse_shp):
         try:
-            gdf_land = gpd.read_file(landuse_shp)
-            land_clip = gdf_land.cx[18.8:21.7, 44.6:46.2]
+            land_clip = ucitaj_shp_sloj(landuse_shp, max_objekata=800)
             fg_land = folium.FeatureGroup(name='OSM Korišćenje zemljišta (SHP)', show=False)
             landuse_colors = {
                 'residential': '#f0e68c', 'industrial': '#cd853f',
