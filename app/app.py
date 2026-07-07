@@ -197,8 +197,9 @@ elif menu == "Lokacije":
             st.error("Popuni sve obavezne podatke!")
 
     st.divider()
-    # UPDATE — forma za ažuriranje lokacije
+    # UPDATE — forma za ažuriranje lokacije (parcijalno: prazno polje zadržava staru vrednost)
     st.subheader("Ažuriraj lokaciju")
+    st.caption("Unesi ID i samo polja koja želiš da promeniš — ostavi prazno (ili '(bez izmene)') da se zadrži postojeća vrednost.")
     col1, col2 = st.columns(2)
     with col1:
         upd_lok_id   = st.number_input("ID lokacije", min_value=1, step=1, key="upd_lok_id")
@@ -206,21 +207,26 @@ elif menu == "Lokacije":
         upd_opstina  = st.text_input("Nova opština", key="upd_lok_opstina")
     with col2:
         upd_adresa   = st.text_input("Nova adresa", key="upd_lok_adresa")
-        upd_tip      = st.selectbox("Novi tip područja", ["park", "stambeno", "industrijsko", "prigradsko", "druge"], key="upd_lok_tip")
+        upd_tip      = st.selectbox("Novi tip područja", ["(bez izmene)", "park", "stambeno", "industrijsko", "prigradsko", "druge"], key="upd_lok_tip")
     if st.button("Ažuriraj lokaciju"):
-        if upd_naziv and upd_opstina and upd_adresa:
+        upd_tip_vrednost = "" if upd_tip == "(bez izmene)" else upd_tip
+        if upd_naziv or upd_opstina or upd_adresa or upd_tip_vrednost:
             cursor = conn.cursor()
+            # COALESCE(NULLIF(%s,''), staro) — prazno polje ne menja postojeću vrednost
             cursor.execute("""
                 UPDATE lokacije
-                SET naziv = %s, opstina = %s, adresa = %s, tip_podrucja = %s
+                SET naziv = COALESCE(NULLIF(%s,''), naziv),
+                    opstina = COALESCE(NULLIF(%s,''), opstina),
+                    adresa = COALESCE(NULLIF(%s,''), adresa),
+                    tip_podrucja = COALESCE(NULLIF(%s,''), tip_podrucja)
                 WHERE id = %s
-            """, (upd_naziv, upd_opstina, upd_adresa, upd_tip, int(upd_lok_id)))
+            """, (upd_naziv, upd_opstina, upd_adresa, upd_tip_vrednost, int(upd_lok_id)))
             conn.commit()
             cursor.close()
             st.success(f"Lokacija {upd_lok_id} uspešno ažurirana!")
             st.rerun()
         else:
-            st.error("Popuni sve polja za ažuriranje!")
+            st.error("Unesi bar jedno polje za ažuriranje!")
 
     st.divider()
     # DELETE — brisanje lokacije po ID-u
@@ -351,7 +357,7 @@ elif menu == "Kontejneri":
         st.markdown("""
         Stranica za upravljanje kontejnerima.
         - **Dodaj** novi kontejner
-        - **Ažuriraj** stanje kontejnera (dobro / oštećen / loše)
+        - **Ažuriraj** stanje kontejnera (dobro / ostecen / lose)
         - **Obriši** kontejner po ID-u
         """)
 
@@ -374,10 +380,10 @@ elif menu == "Kontejneri":
     col1, col2 = st.columns(2)
     lokacije_list = pd.read_sql("SELECT id, naziv FROM lokacije ORDER BY naziv", conn)
     with col1:
-        tip       = st.selectbox("Tip kontejnera", ["komunalni", "reciklažni", "podzemni"])
+        tip       = st.selectbox("Tip kontejnera", ["komunalni", "reciklazni", "reciklazni staklo", "reciklazni papir", "reciklazni metal"])
         kapacitet = st.number_input("Kapacitet (litara)", min_value=100, step=100, value=1100)
     with col2:
-        stanje  = st.selectbox("Stanje", ["dobro", "oštećen", "loše"])
+        stanje  = st.selectbox("Stanje", ["dobro", "ostecen", "lose"])
         if len(lokacije_list) > 0:
             lokacija = st.selectbox("Lokacija", lokacije_list['naziv'].tolist())
         else:
@@ -410,7 +416,7 @@ elif menu == "Kontejneri":
     with col1:
         upd_id = st.number_input("ID kontejnera", min_value=1, step=1, key="upd_id")
     with col2:
-        novo_stanje = st.selectbox("Novo stanje", ["dobro", "oštećen", "loše"], key="upd_stanje")
+        novo_stanje = st.selectbox("Novo stanje", ["dobro", "ostecen", "lose"], key="upd_stanje")
     if st.button("Ažuriraj kontejner"):
         cursor = conn.cursor()
         cursor.execute("UPDATE kontejneri SET stanje = %s WHERE id = %s", (novo_stanje, int(upd_id)))
@@ -469,7 +475,7 @@ elif menu == "Deponije":
         naziv    = st.text_input("Naziv deponije")
         povrsina = st.number_input("Površina (m²)", min_value=10, step=10, value=100)
     with col2:
-        tip_otpada = st.selectbox("Tip otpada", ["komunalni", "građevinski", "mešoviti", "industrijski"])
+        tip_otpada = st.selectbox("Tip otpada", ["komunalni otpad", "mesoviti otpad", "građevinski otpad", "industrijski otpad"])
         status     = st.selectbox("Status", ["aktivna", "u sanaciji", "sanirana"])
 
     if len(lokacije_list) > 0:
@@ -599,12 +605,15 @@ elif menu == "Inspekcije":
     with col2:
         nova_preporuka = st.text_input("Nova preporuka", key="nova_prep")
     if st.button("Ažuriraj inspekciju"):
-        cursor = conn.cursor()
-        cursor.execute("UPDATE inspekcije SET preporuka = %s WHERE id = %s", (nova_preporuka, int(upd_ins_id)))
-        conn.commit()
-        cursor.close()
-        st.success(f"Inspekcija {upd_ins_id} ažurirana!")
-        st.rerun()
+        if nova_preporuka:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE inspekcije SET preporuka = %s WHERE id = %s", (nova_preporuka, int(upd_ins_id)))
+            conn.commit()
+            cursor.close()
+            st.success(f"Inspekcija {upd_ins_id} ažurirana!")
+            st.rerun()
+        else:
+            st.error("Unesi novu preporuku za ažuriranje!")
 
     st.divider()
     # DELETE
@@ -631,10 +640,10 @@ elif menu == "ML Detekcija":
         Stranica za pregled i upravljanje ML detektovanim divljim deponijama.
 
         **Kako funkcioniše ML detekcija?**
-        Algoritam Random Forest se trenira na spektralnim podacima baziranim na OSM landuse kategorijama
-        (NDVI, osvetljenost, tekstura, NIR kanali). Pikseli klasifikovani kao "deponija" upisuju se u bazu.
+        Algoritam Random Forest se trenira na simuliranom satelitskom snimku čije su spektralne
+        vrednosti postavljene na stvarne koordinate gradova i deponija iz baze (NDVI, osvetljenost,
+        tekstura, NIR kanali). Pikseli klasifikovani sa verovatnoćom > 90% kao "deponija" upisuju se u bazu.
 
-        - **Confidence** — sigurnost modela (0–1); viša vrednost = pouzdanija detekcija
         - Možeš **ažurirati tip otpada** i **status** svake ML deponije
         """)
 
@@ -661,15 +670,21 @@ elif menu == "ML Detekcija":
         with col1:
             ml_id = st.number_input("ID deponije", min_value=1, step=1, key="ml_upd_id")
         with col2:
-            ml_tip = st.selectbox("Tip otpada", ["komunalni", "građevinski", "mešoviti", "industrijski"], key="ml_tip")
+            ml_tip = st.selectbox("Tip otpada", ["(bez izmene)", "komunalni otpad", "mesoviti otpad", "građevinski otpad", "industrijski otpad"], key="ml_tip")
         with col3:
-            ml_status = st.selectbox("Status", ["detektovana", "potvrđena", "u sanaciji", "sanirana"], key="ml_status")
+            ml_status = st.selectbox("Status", ["(bez izmene)", "detektovana", "potvrđena", "u sanaciji", "sanirana"], key="ml_status")
 
         if st.button("Ažuriraj ML deponiju"):
+            ml_tip_vrednost    = "" if ml_tip == "(bez izmene)" else ml_tip
+            ml_status_vrednost = "" if ml_status == "(bez izmene)" else ml_status
             cursor = conn.cursor()
+            # COALESCE(NULLIF(%s,''), staro) — "(bez izmene)" ne menja postojeću vrednost
             cursor.execute(
-                "UPDATE deponije SET tip_otpada = %s, status = %s WHERE id = %s",
-                (ml_tip, ml_status, int(ml_id))
+                """UPDATE deponije
+                   SET tip_otpada = COALESCE(NULLIF(%s,''), tip_otpada),
+                       status = COALESCE(NULLIF(%s,''), status)
+                   WHERE id = %s""",
+                (ml_tip_vrednost, ml_status_vrednost, int(ml_id))
             )
             conn.commit()
             cursor.close()

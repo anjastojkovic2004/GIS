@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 # Potisnuti shapely RuntimeWarning koji se pojavljuje kod nekih geometrija
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='shapely')
 
-# Učitava DB_URL iz .env fajla
+# Učitava DB_URL iz .env fajla, ovako konekcioni string na bazu nikada nije hardkodovan 
 load_dotenv()
 DB_URL = os.environ.get("DB_URL")
 
@@ -28,6 +28,7 @@ VOJV_MINX, VOJV_MAXX = 18.8, 21.7
 VOJV_MINY, VOJV_MAXY = 44.6, 46.2
 
 # Rečnik poznatih JKP preduzeća po gradu (OSM naziv grada → (naziv JKP, telefon, email))
+# Nazivi preduzeca i kontakti su ilustrativni podaci, ne stvarni
 JKP = {
     'Нови Сад':          ('JKP Čistoća Novi Sad',          '021/6392-222', 'cistoca@novisad.rs'),
     'Зрењанин':          ('JKP Čistoća Zrenjanin',         '023/511-099',  'cistoca@zrenjanin.rs'),
@@ -77,7 +78,7 @@ PREPORUKE = [
     'Ukloniti otpad i rekultivisati teren',
 ]
 
-
+# Konekcija na bazu pomocu biblioteke psycopg2
 def get_connection():
     """Otvara konekciju na PostgreSQL/PostGIS bazu."""
     return psycopg2.connect(DB_URL)
@@ -93,10 +94,16 @@ def ucitaj_vojvodina_podatke():
     """
     print("Učitavam SHP podatke za Vojvodinu...")
 
+    # Svi gradovi, reciklazna mesta, kontejneri se ucitavaju iz shp fajla za Srbiju i predstavljaju realne podatke
+
     # Gradovi i kasabe koji se podudaraju sa rečnikom JKP
+    # Ucitava ceo shapefile za Srbiju
     places = gpd.read_file(os.path.join(SHP_DIR, 'gis_osm_places_free_1.shp'))
+    #Filtrira samo objekte ciji bbox-evi pripradaju zadatok bbox-u Vojvodine
     gradovi = places.cx[VOJV_MINX:VOJV_MAXX, VOJV_MINY:VOJV_MAXY].copy()
+    #Samo tacke tipa grad/varos, dropna -> odbaci one bez imena
     gradovi = gradovi[gradovi['fclass'].isin(['city', 'town'])].dropna(subset=['name'])
+    # Zadrzi samo one ciji se nazivi nalaze u JKP recniku
     gradovi = gradovi[gradovi['name'].isin(JKP.keys())].reset_index(drop=True)
     print(f"  Gradovi: {len(gradovi)}")
 
@@ -107,6 +114,9 @@ def ucitaj_vojvodina_podatke():
     print(f"  Kontejneri/reciklaža: {len(kontejneri)}")
 
     # Deponije — OSM kategorija 'landfill' iz landuse sloja
+    # Landfill i landuse su OSM kategorije
+    # Landuse je sloj(shapefile) koji opisuje namenu zemljista - svaki poligon u njemu ima atribut fclass, koji kaze
+    # sta je to parce zemljista (residental - stambeno, industrial - industrijsko, landfill - deponija/odlagaliste otpada)
     land = gpd.read_file(os.path.join(SHP_DIR, 'gis_osm_landuse_a_free_1.shp'))
     land_v = land.cx[VOJV_MINX:VOJV_MAXX, VOJV_MINY:VOJV_MAXY].copy()
     deponije = land_v[land_v['fclass'] == 'landfill'].reset_index(drop=True)
@@ -127,11 +137,14 @@ def kreiraj_tabele():
     4. deponije → lokacije
     5. inspekcije → deponije
     """
-    random.seed(42)  # Fiksan seed za reproducibilnost sintetičkih podataka
+    random.seed(42)  # Fiksan seed za reproducibilnost sintetičkih podataka, garantuje da ce svako sledece
+    #pokretanje programa generisati iste sinteticke vrednosti (status deponije, stanje kontejnera, datumi...)
     conn = get_connection()
     cursor = conn.cursor()
 
-    # CASCADE briše sve zavisne redove automatski
+    # CASCADE briše sve zavisne redove automatski - prvo obrisemo tabele ako postoje
+    # redosled suprotan od redosleda kreiranja - prvo se brise ono sto zavisi (inspekcije) a na kraju osnovna tabela
+    # (lokacije)
     cursor.execute("""
         DROP TABLE IF EXISTS inspekcije CASCADE;
         DROP TABLE IF EXISTS deponije CASCADE;
@@ -148,7 +161,7 @@ def kreiraj_tabele():
             opstina VARCHAR(50),
             adresa VARCHAR(200),
             tip_podrucja VARCHAR(50),
-            geom GEOMETRY(Point, 4326)   -- WGS84 geografska tačka
+            geom GEOMETRY(Point, 4326)   -- WGS84 geografska tačka, koriste se geografska sirina i duzina za opis tacke
         );
 
         CREATE TABLE komunalna_preduzeca (
@@ -157,7 +170,7 @@ def kreiraj_tabele():
             kontakt_telefon VARCHAR(20),
             email VARCHAR(100),
             zona_pokrivenosti VARCHAR(100),
-            lokacija_id INTEGER REFERENCES lokacije(id)
+            lokacija_id INTEGER REFERENCES lokacije(id) --strani kljuc, sprecava da ubacimo vrednosti na lokacije koje ne postoje
         );
 
         CREATE TABLE kontejneri (
@@ -178,7 +191,7 @@ def kreiraj_tabele():
             status VARCHAR(50),
             datum_otkrivanja DATE,
             lokacija_id INTEGER REFERENCES lokacije(id),
-            geom GEOMETRY(GEOMETRY, 4326)  -- WGS84 poligon (može biti i MultiPolygon)
+            geom GEOMETRY(GEOMETRY, 4326)  -- WGS84 poligon (može biti i MultiPolygon), genericki tip jer polygon nekada ispadne poligon a nekada multipolygon OSM landuse geometrije nisu uvek postojane
         );
 
         CREATE TABLE inspekcije (
@@ -195,20 +208,21 @@ def kreiraj_tabele():
 
     gradovi, kontejneri_gdf, deponije_gdf = ucitaj_vojvodina_podatke()
 
-    # ── Punjenje lokacija (gradovi iz SHP) ──
+    # Punjenje lokacija (gradovi iz SHP)
     # lok_map: osm_id → db_id (za spajanje kontejnera i deponija)
-    lok_map = {}
+    # OSM ima neke svoje ID-eve, mi ih mapiramo na ID-eve iz nase baze preko  lok_map
+    lok_map = {} # Recnik OSM ID 
     for _, grad in gradovi.iterrows():
         cursor.execute("""
             INSERT INTO lokacije (naziv, opstina, adresa, tip_podrucja, geom)
-            VALUES (%s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            VALUES (%s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))   --ST_MakePoint pravi geometrijsku tacku, SetSRID joj kaze ovo su WGS84 koordinate(bez ovoga PostGIS ne zna kom koordinatno sistemu tacka pripada)
             RETURNING id
         """, (grad['name'], 'Vojvodina', grad['name'], 'grad', grad.geometry.x, grad.geometry.y))
         lok_map[grad['osm_id']] = cursor.fetchone()[0]
     conn.commit()
     print(f"Lokacije unete: {len(lok_map)}")
 
-    # ── Punjenje komunalnih preduzeća (iz JKP rečnika) ──
+    # Punjenje komunalnih preduzeća (iz JKP rečnika)
     for _, grad in gradovi.iterrows():
         jkp = JKP.get(grad['name'])
         if not jkp:
@@ -221,14 +235,14 @@ def kreiraj_tabele():
     conn.commit()
     print("Komunalna preduzeća uneta!")
 
-    # ── Punjenje kontejnera (spatial join na najbliži grad) ──
+    # Punjenje kontejnera (spatial join na najbliži grad) 
     # WGS84 čuvamo za upis prave koordinate, UTM samo za sjoin_nearest u metrima
     gradovi_gdf    = gpd.GeoDataFrame(gradovi, geometry='geometry', crs='EPSG:4326')
-    gradovi_utm    = gradovi_gdf.to_crs('EPSG:32634')
+    gradovi_utm    = gradovi_gdf.to_crs('EPSG:32634') # u metrima
     kontejneri_wgs84 = kontejneri_gdf[['osm_id', 'fclass', 'geometry']].copy()
     kontejneri_utm   = kontejneri_wgs84.to_crs('EPSG:32634')
 
-    # Svaki kontejner se dodeljuje najbližem gradu
+    # Svaki kontejner se dodeljuje najbližem gradu, zbog ovoga nam je bitno da pretvorimo u UTM koordinate
     joined_k = gpd.sjoin_nearest(
         kontejneri_utm,
         gradovi_utm[['osm_id', 'geometry']].rename(columns={'osm_id': 'grad_osm_id'}),
@@ -259,18 +273,26 @@ def kreiraj_tabele():
     conn.commit()
     print(f"Kontejneri uneti: {k_count}")
 
-    # ── Punjenje deponija (iz OSM landfill poligona) ──
-    deponije_wgs84 = deponije_gdf[['osm_id', 'name', 'geometry']].copy()
-    deponije_utm   = deponije_wgs84.to_crs('EPSG:32634')
+    # Punjenje deponija (iz OSM landfill poligona) 
+    # 1. Nadji najblizi grad (u metrima)
+    # 2. Ako je taj grad vec dibio 3 deponije, preskoci ga
+    # 3. Uzmi joj ime (ili izmisli ako ga OSM nema)
+    # 4. Uzmi joj WGS84 geometriju za upis
+    # 5. Izracunaj joj povrsinu iz UTM geometrije (vec u m^2)
+    # 6. Upisi u bazu sa nasumicnim tipom/statusom/datumom
+    # 7. Zapamti ID radi kasnijih inspekcija, povecaj brojac grada
+    deponije_wgs84 = deponije_gdf[['osm_id', 'name', 'geometry']].copy() #koordinate u stepenima, za upis u bazu
+    deponije_utm   = deponije_wgs84.to_crs('EPSG:32634') #koordinate u metrima, za pronalazak najblizeg grada
 
     # Svaka deponija se dodeljuje najbližem gradu
+    # sjoin_neares uzima svaku deponiju iz deponije_utm i pronalazi joj najblizi grad iz gradovi_utm
     joined_d = gpd.sjoin_nearest(
         deponije_utm,
         gradovi_utm[['osm_id', 'geometry']].rename(columns={'osm_id': 'grad_osm_id'}),
         how='left'
     )
 
-    uneseno_d = {oid: 0 for oid in lok_map}
+    uneseno_d = {oid: 0 for oid in lok_map} # broji koliko je deponije uneseno po gradu
     dep_ids   = []  # ID-ovi unetih deponija (za inspekcije)
 
     for idx, row in joined_d.iterrows():
@@ -299,7 +321,7 @@ def kreiraj_tabele():
     conn.commit()
     print(f"Deponije unete: {len(dep_ids)}")
 
-    # ── Punjenje inspekcija (sintetičke, vezane za prave deponije) ──
+    #  Punjenje inspekcija (sintetičke, vezane za prave deponije) 
     # Inspekcije su sintetičke jer nema javno dostupnih podataka o stvarnim inspekcijama
     for i, dep_id in enumerate(dep_ids[:10]):
         cursor.execute("""

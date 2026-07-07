@@ -3,6 +3,10 @@ geo_analiza.py — Geografska analiza i vizuelizacija podataka
 Učitava OSM SHP podatke za Vojvodinu, spaja ih sa podacima iz PostGIS baze
 i kreira interaktivnu folium mapu sa više slojeva i satelitskom podlogom.
 """
+# WKT - Well-Known Text - standardni tekstualni format (OGC standard) za zapisivanje geometrijskih
+# oblika kao obicnog stringa. To je zajednicki jezik preko kog PostGIS (baza) i Shapely/GeoPandas
+# (Python) razmenjuju geometriju, jer PostGIS interno cuva geometriju u binarnom formatu koji Python 
+# biblioteke ne mogu direktno da procitaju
 
 import geopandas as gpd
 import folium
@@ -29,6 +33,7 @@ def get_connection():
 
 # ─────────────────────────────────────────────
 # 1. Preuzimanje SHP podataka
+# Ovo je samo fallback ako folder sa .shp fajlovima vec ne postoji, onda ce se preuzeti sa GEofabrik sajta
 # ─────────────────────────────────────────────
 def preuzmi_shp_podatke():
     """
@@ -52,9 +57,12 @@ def preuzmi_shp_podatke():
 # ─────────────────────────────────────────────
 def ucitaj_shp_podatke():
     """
-    Učitava places i landuse SHP fajlove i filtrira ih na bbox Vojvodine.
+    Učitava mesta i landuse SHP fajlove i filtrira ih na bbox Vojvodine.
     .cx[] je GeoPandas indeksiranje po koordinatama (coordinate indexing).
     """
+    # Za razliku od baza.py, ovde uzimamo sva mesta i sve landuse povrsine unutar bbox Vojvodine
+    # Razlog: ovi slojevi ovde sluze kao vizuelna referentna podloga na mapi (OSM mesta, OSM koriscena zemljista, 
+    # slojevi koji se mogu ukljucivati/iskljucivati) 
     print("\nUcitavanje SHP podataka...")
 
     # 2a. Mesta (tačke) — gradovi, sela, naselja
@@ -83,6 +91,7 @@ def ucitaj_podatke_iz_baze():
     ST_AsText konvertuje poligon u WKT string za prikaz na mapi.
     """
     conn = get_connection()
+    # cursor sluzi kao posrednik izmedju baze i Python koda
     cursor = conn.cursor()
 
     # Lokacije — koordinate se ekstrahuju iz PostGIS tačke
@@ -91,9 +100,10 @@ def ucitaj_podatke_iz_baze():
                ST_X(geom) as lon, ST_Y(geom) as lat
         FROM lokacije
     """)
+    # Fetchall preuzima podatke iz upita u Python promenljivu
     rows = cursor.fetchall()
     df_lokacije = pd.DataFrame(rows,
-        columns=['id', 'naziv', 'opstina', 'adresa', 'tip_podrucja', 'lon', 'lat'])
+        columns=['id', 'naziv', 'opstina', 'adresa', 'tip_podrucja', 'lon', 'lat']) #Rucno pravljen DataFrame
 
     # Kontejneri — sopstvena geom koordinata (ne koordinata grada), JOIN za naziv lokacije
     df_kontejneri = pd.read_sql("""
@@ -102,9 +112,12 @@ def ucitaj_podatke_iz_baze():
                l.naziv as lokacija, l.id as lokacija_id
         FROM kontejneri k
         JOIN lokacije l ON k.lokacija_id = l.id
-    """, conn)
+    """, conn)  # odmah u DataFrame 
 
     # Deponije — geometrija kao WKT (Well-Known Text) za crtanje poligona na mapi
+    # ostaje lista tuplova, posto ce kasnije trebati da se iterira kroz njega
+    # (lakse je iterirati kroz tuple, nego kroz DataFrame). ST_AsText(geom) - pretvara
+    # PostGIS poligon u WKT tekst
     cursor.execute("""
         SELECT id, naziv, povrsina_m2, tip_otpada, status,
                ST_AsText(geom) as geom_text
@@ -130,13 +143,16 @@ def spoji_shp_sa_bazom(df_lokacije, gdf_places):
 
     # Konvertuj DataFrame lokacija u GeoDataFrame (dodaj geometry kolonu)
     geometry = [Point(xy) for xy in zip(df_lokacije['lon'], df_lokacije['lat'])]
-    gdf_baza = gpd.GeoDataFrame(df_lokacije.copy(), geometry=geometry, crs='EPSG:4326')
+    gdf_baza = gpd.GeoDataFrame(df_lokacije.copy(), geometry=geometry, crs='EPSG:4326')#ovo je oznaka za WGS84
 
     # Uskladi koordinatne sisteme ako se razlikuju
     if gdf_places.crs != gdf_baza.crs:
         gdf_places = gdf_places.to_crs(gdf_baza.crs)
 
-    # Nearest join — svaka lokacija iz baze dobija atribute najbližeg OSM mesta
+    # Nearest join — svaka lokacija iz baze dobija atribute najbližeg OSM mesta, radi se sa WGS84 
+    # Ovaj postupak daje brz uvid u to koliko se dobro lokacije iz baze poklapaju sa OSM podacima.
+    # Svrha ovoga je da se potvrdi da li se baza i OSM slazu
+    # distance_m ne upisujemo nazad u bazu, on nam je samo brza provera
     joined = gpd.sjoin_nearest(
         gdf_baza[['id', 'naziv', 'lon', 'lat', 'geometry']],
         gdf_places[['name', 'fclass', 'geometry']],
@@ -165,13 +181,15 @@ def kreiraj_mapu(df_lokacije, df_kontejneri, deponije_data, gdf_places, gdf_land
     - Sloj 5: Deponije (poligoni, boje po statusu)
     Svi slojevi se mogu uključiti/isključiti putem LayerControl-a.
     """
+    # Esri World Imagery i OSM  standarni tile, oba sa overaly=false, sto ih cini medjusobno iskljucivim
+    # odnosno mogu se pomocu LayerControl birati kao osnova (ili jedan ili drugi)
     print("\nKreiranje mape...")
 
     # fit_bounds automatski podešava zoom da prikaže celu Vojvodinu
     mapa = folium.Map()
     mapa.fit_bounds([[44.6, 18.8], [46.2, 21.7]])
 
-    # ── Raster podloga: satelitski snimak (Esri World Imagery WMS tile) ──
+    # Raster podloga: satelitski snimak (Esri World Imagery WMS tile) ──
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         attr='Esri World Imagery',

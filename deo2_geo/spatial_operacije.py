@@ -30,6 +30,7 @@ def ucitaj_vojvodina_granicu():
     Koristi se umesto pravougaonog bbox-a jer Vojvodina nije pravougaonog oblika —
     bbox bi zahvatio i delove susednih zemalja (Rumunija, Mađarska).
     """
+    # na=False - ako neki red ima ime name=Nan, dobili bismo gresku, a ovo kaze tretiraj ono sto nema imena kao ne odgovara
     adminareas = gpd.read_file(os.path.join(SHP_DIR, 'gis_osm_adminareas_a_free_1.shp'))
     voj = adminareas[adminareas['name'].str.contains('Војводина', na=False)]
     return voj.iloc[0].geometry

@@ -112,7 +112,7 @@ def kreiraj_mapu_spatial(lokacije_df, deponije_df):
         ).add_to(fg_buffer)
     fg_buffer.add_to(mapa)
 
-    # ── Sloj 3: Clip zona — prava granica Vojvodine (ne pravougaonik) ──
+    # ── Sloj 4: Clip zona — prava granica Vojvodine (ne pravougaonik) ──
     fg_clip = folium.FeatureGroup(name='Clip zona', show=True)
     voj_geom = ucitaj_vojvodina_granicu()
     if voj_geom.geom_type == 'MultiPolygon':
@@ -129,7 +129,7 @@ def kreiraj_mapu_spatial(lokacije_df, deponije_df):
     ).add_to(fg_clip)
     fg_clip.add_to(mapa)
 
-    # ── Sloj 4: Linije distanci između susednih lokacija (crvene linije) ──
+    # ── Sloj 5: Linije distanci između susednih lokacija (crvene linije) ──
     fg_distance = folium.FeatureGroup(name='Distanca između lokacija', show=True)
     for i in range(len(lokacije_df) - 1):
         lat1, lon1 = lokacije_df.iloc[i][['lat', 'lon']]

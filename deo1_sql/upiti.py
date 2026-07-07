@@ -142,7 +142,7 @@ print(df9)
 
 # ─────────────────────────────────────────────
 # UPIT 10: Sveobuhvatni izveštaj po lokaciji
-# Trostruki LEFT JOIN sa COUNT DISTINCT da se izbjegne dupliranje redova
+# Trostruki LEFT JOIN sa COUNT DISTINCT da se izbegne dupliranje redova
 # COALESCE(SUM(DISTINCT ...), 0) — ukupna površina bez duplikata
 # ─────────────────────────────────────────────
 print("\n=== 10. Sveobuhvatni izveštaj po lokaciji ===")

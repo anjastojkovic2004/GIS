@@ -416,7 +416,7 @@ def kreiraj_mapu(geometries):
     """
     Kreira folium mapu sa slojem ML detektovanih deponija prikazanih kao
     stvarni vektorski poligoni (ne aproksimativni kružni markeri).
-    Esri satelitska podloga za vizuelni kontekst.
+    Esri satelitska podloga za vizuelni kontekst, uz konturu granice Srbije.
     """
     mapa = folium.Map()
     mapa.fit_bounds([[VOJV_MINY, VOJV_MINX], [VOJV_MAXY, VOJV_MAXX]])
@@ -426,6 +426,19 @@ def kreiraj_mapu(geometries):
         attr='Esri World Imagery', name='Satelitska podloga',
         overlay=False, control=True
     ).add_to(mapa)
+
+    # Granica Srbije (OSM adminareas, fclass='national') — samo kontura, radi orijentacije
+    adminareas = gpd.read_file(os.path.join(SHP_DIR, 'gis_osm_adminareas_a_free_1.shp'))
+    srbija_geom = adminareas[adminareas['fclass'] == 'national'].iloc[0].geometry
+    if srbija_geom.geom_type == 'MultiPolygon':
+        srbija_geom = list(srbija_geom.geoms)[0]
+    fg_granica = folium.FeatureGroup(name='Granica Srbije', show=True)
+    folium.Polygon(
+        locations=[[y, x] for x, y in srbija_geom.exterior.coords],
+        popup='Granica Republike Srbije',
+        color='white', weight=2.5, fill=False
+    ).add_to(fg_granica)
+    fg_granica.add_to(mapa)
 
     fg = folium.FeatureGroup(name='ML Detektovane deponije', show=True)
     for i, geom in enumerate(geometries):

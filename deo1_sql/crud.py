@@ -9,9 +9,11 @@ import pandas as pd
 import os
 from dotenv import load_dotenv
 
+#Ucitava .env fajl koji sadrzi link ka bazi
 load_dotenv()
 DB_URL = os.environ.get("DB_URL")
 
+# Otvara konekciju
 def get_connection():
     """Otvara i vraća novu konekciju na PostgreSQL bazu."""
     return psycopg2.connect(DB_URL)
@@ -47,9 +49,10 @@ def prikazi_lokacije():
     ST_X i ST_Y ekstrahuju longitude i latitude iz PostGIS geometry kolone.
     """
     conn = get_connection()
+    # Direktno vraca pandas.DataFrame
     df = pd.read_sql("""
         SELECT id, naziv, opstina, adresa, tip_podrucja,
-               ST_X(geom) as lon, ST_Y(geom) as lat
+               ST_X(geom) as lon, ST_Y(geom) as lat --Izvlaci lon i lat iz PostGIS geom kolone u obicne brojeve
         FROM lokacije
         ORDER BY id
     """, conn)
@@ -63,7 +66,7 @@ def azuriraj_lokaciju(lokacija_id, novi_naziv, nova_opstina, nova_adresa, novi_t
     int() konverzija je neophodna jer pandas može da vrati numpy.int64
     koji psycopg2 ne može da adaptira.
     """
-    lokacija_id = int(lokacija_id)
+    lokacija_id = int(lokacija_id) #ako ID stigne direktno iz pandasa on je tipa numpy.int64, koji psycopg2 ne zna da adaptira direktno u SQL parametar
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
