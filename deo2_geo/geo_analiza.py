@@ -173,7 +173,7 @@ def spoji_shp_sa_bazom(df_lokacije, gdf_places):
 def kreiraj_mapu(df_lokacije, df_kontejneri, deponije_data, gdf_places, gdf_landuse):
     """
     Kreira interaktivnu folium mapu sa sledećim slojevima:
-    - Raster podloga: Esri World Imagery satelitski snimak
+    - Raster podloga: Esri World Imagery satelitski snimak ili OSM standardni tile
     - SHP sloj 1: OSM mesta (tačke)
     - SHP sloj 2: OSM korišćenje zemljišta (poligoni)
     - Sloj 3: Lokacije iz baze

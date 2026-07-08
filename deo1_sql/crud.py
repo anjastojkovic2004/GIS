@@ -2,6 +2,11 @@
 crud.py — CRUD operacije nad PostgreSQL/PostGIS bazom
 Implementira Create, Read, Update, Delete za svih 5 tabela:
 lokacije, komunalna_preduzeca, kontejneri, deponije, inspekcije
+koristimo:
+INSERT - dodavanje
+SELECT - citanje
+UPDATE - azuriranje
+DELETE  - brisanje
 """
 
 import psycopg2
@@ -29,6 +34,7 @@ def dodaj_lokaciju(naziv, opstina, adresa, tip_podrucja, lon, lat):
     ST_MakePoint(lon, lat) kreira tačku, ST_SetSRID postavlja koordinatni sistem EPSG:4326 (WGS84).
     Vraća ID novog reda.
     """
+    # conn.coursos() -> coursor je posrednik izmedju Pythona i baze podataka (nesto kao pokazivac na bazu)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -36,7 +42,7 @@ def dodaj_lokaciju(naziv, opstina, adresa, tip_podrucja, lon, lat):
         VALUES (%s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
         RETURNING id
     """, (naziv, opstina, adresa, tip_podrucja, lon, lat))
-    new_id = cursor.fetchone()[0]
+    new_id = cursor.fetchone()[0] # sledeca kolona u bazi, odnosno id (fetchone)
     conn.commit()
     cursor.close()
     conn.close()
@@ -66,7 +72,7 @@ def azuriraj_lokaciju(lokacija_id, novi_naziv, nova_opstina, nova_adresa, novi_t
     int() konverzija je neophodna jer pandas može da vrati numpy.int64
     koji psycopg2 ne može da adaptira.
     """
-    lokacija_id = int(lokacija_id) #ako ID stigne direktno iz pandasa on je tipa numpy.int64, koji psycopg2 ne zna da adaptira direktno u SQL parametar
+    lokacija_id = int(lokacija_id) 
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""

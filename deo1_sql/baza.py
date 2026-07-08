@@ -5,7 +5,7 @@ lokacije (gradovi), komunalna_preduzeca (JKP), kontejneri (iz pois SHP),
 deponije (landfill iz landuse SHP), inspekcije (sintetičke).
 """
 
-import psycopg2
+import psycopg2 #za povezivanje na bazu
 import pandas as pd
 import geopandas as gpd
 import os

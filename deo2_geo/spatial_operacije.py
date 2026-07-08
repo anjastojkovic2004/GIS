@@ -151,7 +151,7 @@ def difference_operacija(lokacije_df, buffer_zone):
 
     print(f"Pronađeno {len(difference_result)} gradova izvan zona rizika")
     if len(difference_result) > 0:
-        # naziv_left jer sjoin preimeuje kolone kada oba DF-a imaju kolonu 'naziv'
+        # naziv_left jer sjoin preimenuje kolone kada oba DF-a imaju kolonu 'naziv'
         print(difference_result[['naziv_left']].rename(columns={'naziv_left': 'naziv'}))
     else:
         print("Svi gradovi se nalaze u nekoj zoni rizika")
